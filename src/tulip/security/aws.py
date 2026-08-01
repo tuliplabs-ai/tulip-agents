@@ -68,9 +68,7 @@ def _profile() -> str:
 
 
 def _region(region: str | None) -> str:
-    if region:
-        return region
-    return os.environ.get("TULIP_AWS_REGION") or "us-east-1"
+    return region or os.environ.get("TULIP_AWS_REGION") or "us-east-1"
 
 
 def _session(region: str | None = None) -> Any:
