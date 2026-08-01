@@ -942,3 +942,97 @@ class TestParameterPassthrough:
 
         for expected in ("tool_choice", "parallel_tool_calls", "logprobs", "n", "seed"):
             assert expected in _OPENAI_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# ModelResponse carries logprobs and extra candidates (#53)
+# ---------------------------------------------------------------------------
+
+
+class _UsageChunk:
+    """Trailing chunk carrying usage and no choices (stream_options)."""
+
+    def __init__(self, prompt: int, completion: int) -> None:
+        self.choices: list[Any] = []
+        self.usage = _Usage(prompt, completion)
+
+
+class TestResponseExtras:
+    @pytest.mark.asyncio
+    async def test_extra_candidates_are_kept(self) -> None:
+        """n>1 is paid for; the extra choices must not be discarded."""
+        client = _client_with(
+            response=_Response(
+                choices=[
+                    _Choice(message=_MsgStub(content="first")),
+                    _Choice(message=_MsgStub(content="second")),
+                    _Choice(message=_MsgStub(content="third")),
+                ]
+            )
+        )
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")], n=3)
+        assert resp.message.content == "first"
+        assert [c.content for c in resp.candidates] == ["second", "third"]
+
+    @pytest.mark.asyncio
+    async def test_single_choice_leaves_candidates_empty(self) -> None:
+        client = _client_with()
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")])
+        assert resp.candidates == []
+
+    @pytest.mark.asyncio
+    async def test_logprobs_are_passed_through(self) -> None:
+        client = _client_with()
+        client.chat.completions.create.return_value.choices[0].logprobs = {"content": [1, 2]}
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")], logprobs=True)
+        assert resp.logprobs == {"content": [1, 2]}
+
+
+# ---------------------------------------------------------------------------
+# Streaming exposes usage and stop_reason (#54)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamTermination:
+    @pytest.mark.asyncio
+    async def test_usage_chunk_is_not_dropped(self) -> None:
+        """The usage chunk carries no choices — it must survive the guard."""
+        client = _client_with(
+            stream_chunks=[
+                _Chunk(choices=[_ChunkChoice(delta=_Delta(content="hi"), finish_reason=None)]),
+                _Chunk(choices=[_ChunkChoice(delta=_Delta(), finish_reason="stop")]),
+                _UsageChunk(11, 5),
+            ]
+        )
+        m = _model_with(client)
+        events = [ev async for ev in m.stream([Message.user("hi")])]
+
+        final = events[-1]
+        assert final.done is True
+        assert final.usage == {"prompt_tokens": 11, "completion_tokens": 5}
+        assert final.stop_reason == "stop"
+
+    @pytest.mark.asyncio
+    async def test_length_truncation_is_reported(self) -> None:
+        client = _client_with(
+            stream_chunks=[_Chunk(choices=[_ChunkChoice(delta=_Delta(), finish_reason="length")])]
+        )
+        m = _model_with(client)
+        events = [ev async for ev in m.stream([Message.user("hi")])]
+        assert events[-1].stop_reason == "length"
+
+    @pytest.mark.asyncio
+    async def test_done_is_emitted_exactly_once(self) -> None:
+        client = _client_with(
+            stream_chunks=[
+                _Chunk(choices=[_ChunkChoice(delta=_Delta(content="a"), finish_reason=None)]),
+                _Chunk(choices=[_ChunkChoice(delta=_Delta(), finish_reason="stop")]),
+                _UsageChunk(1, 1),
+            ]
+        )
+        m = _model_with(client)
+        events = [ev async for ev in m.stream([Message.user("hi")])]
+        assert sum(1 for e in events if e.done) == 1

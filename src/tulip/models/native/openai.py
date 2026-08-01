@@ -433,11 +433,38 @@ class OpenAIModel(BaseModel):
                 "completion_tokens": response.usage.completion_tokens,
             }
 
+        # ``n>1`` costs the caller tokens for every candidate; keep the extras
+        # instead of discarding everything past choices[0].
+        candidates: list[Message] = []
+        for extra in getattr(response, "choices", [])[1:]:
+            extra_msg = getattr(extra, "message", None)
+            if extra_msg is None:
+                continue
+            extra_calls: list[ToolCall] = []
+            for tc in getattr(extra_msg, "tool_calls", None) or []:
+                extra_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=_decode_tool_arguments(tc.function.arguments),
+                    )
+                )
+            extra_content = getattr(extra_msg, "content", None)
+            if not isinstance(extra_content, str):
+                extra_content = None
+            candidates.append(Message.assistant(content=extra_content, tool_calls=extra_calls))
+
+        # Passed through as the provider shaped it — consumers of logprobs
+        # want the raw numbers, not a lossy normalisation.
+        logprobs = getattr(choice, "logprobs", None)
+
         return ModelResponse(
             message=message,
             usage=usage,
             stop_reason=choice.finish_reason,
             reasoning=reasoning,
+            logprobs=logprobs,
+            candidates=candidates,
         )
 
     async def complete(
@@ -587,7 +614,24 @@ class OpenAIModel(BaseModel):
 
         stream = await self.client.chat.completions.create(**request_kwargs)
 
+        final_usage: dict[str, int] | None = None
+        final_stop_reason: str | None = None
+
         async for chunk in stream:
+            # When the caller asks for usage (``stream_options``), it arrives on
+            # a trailing chunk that carries no choices — so this has to be read
+            # before the empty-choices guard below, which would otherwise drop
+            # the only chunk that has it.
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                prompt_tokens = getattr(chunk_usage, "prompt_tokens", None)
+                completion_tokens = getattr(chunk_usage, "completion_tokens", None)
+                if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int):
+                    final_usage = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    }
+
             if not chunk.choices:
                 continue
 
@@ -665,4 +709,10 @@ class OpenAIModel(BaseModel):
                         )
                     yield ModelChunkEvent(tool_calls=tool_calls)
 
-                yield ModelChunkEvent(done=True)
+                if isinstance(choice.finish_reason, str):
+                    final_stop_reason = choice.finish_reason
+
+        # Emitted after the loop rather than at ``finish_reason``: the usage
+        # chunk arrives *after* the choice that carries the finish reason, so
+        # closing early would report a turn we cannot yet meter.
+        yield ModelChunkEvent(done=True, usage=final_usage, stop_reason=final_stop_reason)

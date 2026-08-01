@@ -86,6 +86,15 @@ class ModelResponse(BaseModel):
     # ship reasoning in a channel separate from ``message.content`` set
     # this; the agent loop prefers it for ``ThinkEvent.reasoning``.
     reasoning: str | None = None
+    # Token log-probabilities, when the caller asked for them
+    # (``logprobs=True``). The shape is the provider's own — it is
+    # passed through rather than normalised, because the consumers of
+    # this (confidence gating, calibration) care about the raw numbers.
+    logprobs: Any | None = None
+    # Additional candidates when the caller asked for more than one
+    # (``n>1``). ``message`` remains the first choice, so single-candidate
+    # callers are unaffected; these are the rest, in the order returned.
+    candidates: list[Message] = Field(default_factory=list)
 
     @property
     def content(self) -> str | None:
