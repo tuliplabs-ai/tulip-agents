@@ -1608,9 +1608,15 @@ class AgentRuntimeMixin:
             complete_kwargs: dict[str, Any] = {
                 "messages": messages,
                 "tools": tool_schemas or None,
-                "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
             }
+            # Forward agent-level sampling only when it was actually set.
+            # These land as per-call overrides, which beat the model's own
+            # config — so sending a default here would silently discard
+            # whatever get_model(...) was configured with.
+            if self.config.temperature is not None:
+                complete_kwargs["temperature"] = self.config.temperature
+            if self.config.max_tokens is not None:
+                complete_kwargs["max_tokens"] = self.config.max_tokens
             if native_response_format is not None:
                 complete_kwargs["response_format"] = native_response_format
 

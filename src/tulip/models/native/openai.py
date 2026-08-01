@@ -463,7 +463,9 @@ class OpenAIModel(BaseModel):
         uses_completion_tokens = self._uses_max_completion_tokens(self.config.model)
         rejects_sampling = self._rejects_sampling_params(self.config.model)
 
-        max_tokens_value = kwargs.get("max_tokens", self.config.max_tokens)
+        max_tokens_value = kwargs.get("max_tokens")
+        if max_tokens_value is None:
+            max_tokens_value = self.config.max_tokens
 
         request_kwargs: dict[str, Any] = {
             "model": self.config.model,
@@ -542,7 +544,9 @@ class OpenAIModel(BaseModel):
         uses_completion_tokens = self._uses_max_completion_tokens(self.config.model)
         rejects_sampling = self._rejects_sampling_params(self.config.model)
 
-        max_tokens_value = kwargs.get("max_tokens", self.config.max_tokens)
+        max_tokens_value = kwargs.get("max_tokens")
+        if max_tokens_value is None:
+            max_tokens_value = self.config.max_tokens
 
         request_kwargs: dict[str, Any] = {
             "model": self.config.model,

@@ -303,7 +303,7 @@ class AnthropicModel(BaseModel):
         params: dict[str, Any] = {
             "model": self.config.model,
             "messages": anthropic_messages,
-            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+            "max_tokens": kwargs.get("max_tokens") or self.config.max_tokens,
         }
         # Claude Opus 4.7 (and presumably later 4.x reasoning models) reject
         # `temperature` with `invalid_request_error: temperature is deprecated
@@ -424,7 +424,7 @@ class AnthropicModel(BaseModel):
         params: dict[str, Any] = {
             "model": self.config.model,
             "messages": anthropic_messages,
-            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+            "max_tokens": kwargs.get("max_tokens") or self.config.max_tokens,
         }
         if system_prompt:
             params["system"] = system_prompt
