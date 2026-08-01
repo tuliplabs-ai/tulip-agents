@@ -1036,3 +1036,50 @@ class TestStreamTermination:
         m = _model_with(client)
         events = [ev async for ev in m.stream([Message.user("hi")])]
         assert sum(1 for e in events if e.done) == 1
+
+
+# ---------------------------------------------------------------------------
+# Mid-run system messages must stay portable
+# ---------------------------------------------------------------------------
+
+
+class TestSystemMessagePosition:
+    """The loop injects guidance as system messages mid-run; vLLM serving Qwen
+    rejects those outright with 'System message must be at the beginning'."""
+
+    @pytest.mark.asyncio
+    async def test_leading_system_message_is_untouched(self) -> None:
+        client = _client_with()
+        m = _model_with(client)
+        await m.complete([Message.system("you are helpful"), Message.user("hi")])
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert sent[0]["role"] == "system"
+        assert sent[0]["content"] == "you are helpful"
+
+    @pytest.mark.asyncio
+    async def test_later_system_message_becomes_a_user_note(self) -> None:
+        client = _client_with()
+        m = _model_with(client)
+        await m.complete(
+            [
+                Message.system("you are helpful"),
+                Message.user("hi"),
+                Message.system("[Grounding Check Failed] try again"),
+            ]
+        )
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert [x["role"] for x in sent] == ["system", "user", "user"]
+        # the guidance survives, just re-encoded
+        assert "[Grounding Check Failed] try again" in sent[-1]["content"]
+        assert sent[-1]["content"].startswith("[System guidance]")
+
+    @pytest.mark.asyncio
+    async def test_stream_applies_the_same_normalisation(self) -> None:
+        client = _client_with(
+            stream_chunks=[_Chunk(choices=[_ChunkChoice(delta=_Delta(), finish_reason="stop")])]
+        )
+        m = _model_with(client)
+        async for _ in m.stream([Message.user("hi"), Message.system("mid-run guidance")]):
+            pass
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert all(x["role"] != "system" for x in sent[1:])

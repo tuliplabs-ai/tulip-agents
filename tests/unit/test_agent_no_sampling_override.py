@@ -69,3 +69,38 @@ async def test_explicit_agent_sampling_is_still_forwarded() -> None:
     kwargs = model.seen[0]
     assert kwargs["temperature"] == 0.2
     assert kwargs["max_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_model_kwargs_reach_the_provider() -> None:
+    """Per-call params must be expressible from Agent — tool_choice above all,
+    since it has to vary per run and model config cannot."""
+    model = _RecordingModel()
+    agent = Agent(model=model, tools=[], system_prompt="p")
+
+    choice = {"type": "function", "function": {"name": "search"}}
+    async for _ in agent.run("hi", model_kwargs={"tool_choice": choice}):
+        pass
+
+    assert model.seen[0]["tool_choice"] == choice
+
+
+@pytest.mark.asyncio
+async def test_model_kwargs_win_over_agent_config() -> None:
+    """The per-run value is the most specific statement of intent."""
+    model = _RecordingModel()
+    agent = Agent(model=model, tools=[], system_prompt="p", temperature=0.9)
+
+    async for _ in agent.run("hi", model_kwargs={"temperature": 0.1}):
+        pass
+
+    assert model.seen[0]["temperature"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_arun_and_run_sync_accept_model_kwargs() -> None:
+    model = _RecordingModel()
+    agent = Agent(model=model, tools=[], system_prompt="p")
+
+    await agent.arun("hi", model_kwargs={"user": "u-1"})
+    assert model.seen[-1]["user"] == "u-1"

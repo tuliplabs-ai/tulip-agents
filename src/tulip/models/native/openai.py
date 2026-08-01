@@ -322,11 +322,30 @@ class OpenAIModel(BaseModel):
         await self.close()
 
     def _convert_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
-        """Convert Tulip messages to OpenAI format."""
+        """Convert Tulip messages to OpenAI format.
+
+        A system message after the first position is re-encoded as a user
+        note. The agent loop legitimately injects mid-run guidance as system
+        messages (grounding replans, repair prompts, iteration nudges), but
+        several OpenAI-compatible chat templates accept a system message only
+        in first position — vLLM serving Qwen rejects the request outright
+        with ``System message must be at the beginning``. That turns a normal
+        guided run into a hard 400 partway through, non-deterministically,
+        depending on whether the run happened to need guidance.
+
+        The text is preserved and clearly marked, so steering still works
+        while the request stays portable.
+        """
         openai_messages: list[dict[str, Any]] = []
 
-        for msg in messages:
-            openai_messages.append(msg.to_openai_format())
+        for index, msg in enumerate(messages):
+            entry = msg.to_openai_format()
+            if index > 0 and entry.get("role") == "system":
+                entry = {
+                    "role": "user",
+                    "content": f"[System guidance] {entry.get('content') or ''}",
+                }
+            openai_messages.append(entry)
 
         return openai_messages
 

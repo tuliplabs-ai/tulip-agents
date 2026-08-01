@@ -177,6 +177,7 @@ class AgentRuntimeMixin:
         *,
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        model_kwargs: dict[str, Any] | None = None,
     ) -> AsyncIterator[TulipEvent]:
         """
         Run the agent with streaming events.
@@ -185,6 +186,11 @@ class AgentRuntimeMixin:
             prompt: User prompt to process
             thread_id: Optional thread ID for checkpointing
             metadata: Additional metadata for tools
+            model_kwargs: Per-call parameters forwarded to the model for this
+                run — ``tool_choice``, ``logprobs``, ``extra_body`` and the
+                rest of the provider's request surface. Model configuration is
+                fixed for a model's lifetime, which is the wrong shape for
+                anything that has to vary per run.
 
         Yields:
             TulipEvent instances for each step
@@ -369,7 +375,7 @@ class AgentRuntimeMixin:
                         )
 
                 # Get model response
-                response, state = await self._get_model_response(state)
+                response, state = await self._get_model_response(state, model_kwargs)
                 prompt_toks = response.usage.get("prompt_tokens", 0)
                 completion_toks = response.usage.get("completion_tokens", 0)
                 cache_creation_toks = response.usage.get("cache_creation_input_tokens", 0)
@@ -1128,6 +1134,7 @@ class AgentRuntimeMixin:
         prompt: str,
         thread_id: str | None,
         metadata: dict[str, Any] | None,
+        model_kwargs: dict[str, Any] | None = None,
     ) -> AsyncIterator[TulipEvent]:
         """Continue execution from a given state (used for resume)."""
         self._initialize()
@@ -1194,7 +1201,7 @@ class AgentRuntimeMixin:
                     break
 
                 state = state.next_iteration()
-                response, state = await self._get_model_response(state)
+                response, state = await self._get_model_response(state, model_kwargs)
                 prompt_toks = response.usage.get("prompt_tokens", 0)
                 completion_toks = response.usage.get("completion_tokens", 0)
                 cache_creation_toks = response.usage.get("cache_creation_input_tokens", 0)
@@ -1539,8 +1546,14 @@ class AgentRuntimeMixin:
     async def _get_model_response(
         self,
         state: AgentState,
+        model_kwargs: dict[str, Any] | None = None,
     ) -> tuple[ModelResponse, AgentState]:
-        """Get a response from the model."""
+        """Get a response from the model.
+
+        ``model_kwargs`` carries per-run request parameters from the caller
+        (see :meth:`run`) — they are the most specific statement of intent, so
+        they win over agent-level configuration.
+        """
         # Server-stateful transports (e.g. OCIResponsesModel) own the
         # conversation history server-side — we send only the input
         # added since the last call (the initial system+user on turn
@@ -1617,6 +1630,10 @@ class AgentRuntimeMixin:
                 complete_kwargs["temperature"] = self.config.temperature
             if self.config.max_tokens is not None:
                 complete_kwargs["max_tokens"] = self.config.max_tokens
+            # Caller-supplied per-run parameters win over agent config: they
+            # are the most specific statement of intent available.
+            if model_kwargs:
+                complete_kwargs.update(model_kwargs)
             if native_response_format is not None:
                 complete_kwargs["response_format"] = native_response_format
 
