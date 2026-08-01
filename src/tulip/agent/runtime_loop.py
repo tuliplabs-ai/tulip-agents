@@ -22,6 +22,7 @@ moved methods.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import threading
 import time
@@ -178,6 +179,7 @@ class AgentRuntimeMixin:
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        stream_tokens: bool = False,
     ) -> AsyncIterator[TulipEvent]:
         """
         Run the agent with streaming events.
@@ -191,6 +193,11 @@ class AgentRuntimeMixin:
                 rest of the provider's request surface. Model configuration is
                 fixed for a model's lifetime, which is the wrong shape for
                 anything that has to vary per run.
+            stream_tokens: Also yield :class:`ModelChunkEvent` as the model
+                produces them, so a UI can render text and chain-of-thought as
+                they arrive instead of waiting for the turn to finish. Tool and
+                termination events are unchanged. Off by default: it changes
+                which event types a consumer sees.
 
         Yields:
             TulipEvent instances for each step
@@ -374,8 +381,24 @@ class AgentRuntimeMixin:
                             )
                         )
 
-                # Get model response
-                response, state = await self._get_model_response(state, model_kwargs)
+                # Get model response. When the caller asked for tokens, the
+                # model call runs as a task and its chunks are drained here, so
+                # they surface while the model is still producing rather than
+                # after it finishes.
+                if stream_tokens:
+                    chunk_queue: asyncio.Queue[Any] = asyncio.Queue()
+                    model_task = asyncio.create_task(
+                        self._get_model_response(state, model_kwargs, chunk_queue)
+                    )
+                    while not model_task.done() or not chunk_queue.empty():
+                        try:
+                            chunk = await asyncio.wait_for(chunk_queue.get(), timeout=0.05)
+                        except TimeoutError:
+                            continue
+                        yield chunk
+                    response, state = await model_task
+                else:
+                    response, state = await self._get_model_response(state, model_kwargs)
                 prompt_toks = response.usage.get("prompt_tokens", 0)
                 completion_toks = response.usage.get("completion_tokens", 0)
                 cache_creation_toks = response.usage.get("cache_creation_input_tokens", 0)
@@ -1543,10 +1566,53 @@ class AgentRuntimeMixin:
 
         return parsed
 
+    async def _complete_streaming(
+        self,
+        complete_kwargs: dict[str, Any],
+        chunk_queue: asyncio.Queue[Any],
+    ) -> ModelResponse:
+        """Drive the model's streaming API, forwarding chunks to the caller.
+
+        Assembles exactly the :class:`ModelResponse` the non-streaming path
+        returns, so everything downstream — after-model hooks, retries,
+        termination, grounding — behaves identically whether or not the caller
+        asked for tokens.
+        """
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        usage: dict[str, int] = {}
+        stop_reason: str | None = None
+
+        async for chunk in self._model.stream(**complete_kwargs):
+            await chunk_queue.put(chunk)
+            if chunk.content:
+                content_parts.append(chunk.content)
+            if getattr(chunk, "reasoning", None):
+                reasoning_parts.append(chunk.reasoning)
+            if chunk.tool_calls:
+                # The provider emits accumulated calls once, at the end.
+                tool_calls = list(chunk.tool_calls)
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage or {}
+            if getattr(chunk, "stop_reason", None):
+                stop_reason = chunk.stop_reason
+
+        return ModelResponse(
+            message=Message.assistant(
+                content="".join(content_parts) or None,
+                tool_calls=tool_calls,
+            ),
+            usage=usage,
+            stop_reason=stop_reason,
+            reasoning="".join(reasoning_parts) or None,
+        )
+
     async def _get_model_response(
         self,
         state: AgentState,
         model_kwargs: dict[str, Any] | None = None,
+        chunk_queue: asyncio.Queue[Any] | None = None,
     ) -> tuple[ModelResponse, AgentState]:
         """Get a response from the model.
 
@@ -1640,7 +1706,14 @@ class AgentRuntimeMixin:
             if server_stateful:
                 complete_kwargs["provider_state"] = state.provider_state
 
-            response = await self._model.complete(**complete_kwargs)
+            # Streaming is used only when the caller asked for tokens and the
+            # transport can supply them. Server-stateful transports are excluded:
+            # they return a continuation token from complete() that the stream
+            # API has no equivalent for.
+            if chunk_queue is not None and not server_stateful and hasattr(self._model, "stream"):
+                response = await self._complete_streaming(complete_kwargs, chunk_queue)
+            else:
+                response = await self._model.complete(**complete_kwargs)
 
             # Post-model hooks: event.retry = True to re-call
             after_event = await self._run_after_model_hooks(response, messages)

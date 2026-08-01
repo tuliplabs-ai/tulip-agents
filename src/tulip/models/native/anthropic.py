@@ -435,4 +435,35 @@ class AnthropicModel(BaseModel):
             async for text in stream.text_stream:
                 yield ModelChunkEvent(content=text)
 
-        yield ModelChunkEvent(done=True)
+            # ``text_stream`` yields text and nothing else — tool_use blocks,
+            # usage and the stop reason live on the assembled message. Without
+            # reading it, a streaming tool-using agent silently loses every
+            # tool call and cannot be metered.
+            final = await stream.get_final_message()
+
+        # ``final.content`` is a union of block types (text, thinking, tool_use,
+        # …); only tool_use carries id/name/input, so read them defensively
+        # rather than narrowing against a shape that grows with the API.
+        tool_calls: list[ToolCall] = []
+        for block in final.content or []:
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            block_input = getattr(block, "input", None)
+            tool_calls.append(
+                ToolCall(
+                    id=str(getattr(block, "id", "") or ""),
+                    name=str(getattr(block, "name", "") or ""),
+                    arguments=block_input if isinstance(block_input, dict) else {},
+                )
+            )
+        if tool_calls:
+            yield ModelChunkEvent(tool_calls=tool_calls)
+
+        usage: dict[str, int] | None = None
+        if final.usage is not None:
+            usage = {
+                "prompt_tokens": final.usage.input_tokens,
+                "completion_tokens": final.usage.output_tokens,
+            }
+
+        yield ModelChunkEvent(done=True, usage=usage, stop_reason=final.stop_reason)
