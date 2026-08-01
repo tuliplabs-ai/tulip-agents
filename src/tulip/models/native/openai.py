@@ -186,9 +186,7 @@ class OpenAIModel(BaseModel):
 
     config: OpenAIConfig
 
-    def _apply_sampling(
-        self, request_kwargs: dict[str, Any], call_kwargs: dict[str, Any]
-    ) -> None:
+    def _apply_sampling(self, request_kwargs: dict[str, Any], call_kwargs: dict[str, Any]) -> None:
         """Merge sampling parameters into a request, omitting unset ones.
 
         ``temperature`` / ``top_p`` resolve to ``None`` when the caller wants
@@ -250,6 +248,7 @@ class OpenAIModel(BaseModel):
             merged.update(per_call)
         if merged:
             request_kwargs["extra_body"] = merged
+
     _client: openai.AsyncOpenAI | None = None
 
     model_config = {"arbitrary_types_allowed": True}

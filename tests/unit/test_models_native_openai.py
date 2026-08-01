@@ -1083,3 +1083,77 @@ class TestSystemMessagePosition:
             pass
         sent = client.chat.completions.create.call_args.kwargs["messages"]
         assert all(x["role"] != "system" for x in sent[1:])
+
+
+class TestResponseExtrasEdgeCases:
+    """Edge cases in candidate parsing and the param-set fallback."""
+
+    @pytest.mark.asyncio
+    async def test_candidate_without_message_is_skipped(self) -> None:
+        """A provider can return a filtered/empty choice with no message."""
+        client = _client_with(
+            response=_Response(
+                choices=[
+                    _Choice(message=_MsgStub(content="first")),
+                    _Choice(message=None),
+                    _Choice(message=_MsgStub(content="third")),
+                ]
+            )
+        )
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")], n=3)
+        assert [c.content for c in resp.candidates] == ["third"]
+
+    @pytest.mark.asyncio
+    async def test_candidate_tool_calls_are_decoded(self) -> None:
+        client = _client_with(
+            response=_Response(
+                choices=[
+                    _Choice(message=_MsgStub(content="first")),
+                    _Choice(
+                        message=_MsgStub(
+                            content=None,
+                            tool_calls=[
+                                _ToolCallStub(call_id="c1", name="search", arguments='{"q":"x"}')
+                            ],
+                        )
+                    ),
+                ]
+            )
+        )
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")], n=2)
+        assert len(resp.candidates) == 1
+        call = resp.candidates[0].tool_calls[0]
+        assert (call.name, call.arguments) == ("search", {"q": "x"})
+
+    @pytest.mark.asyncio
+    async def test_candidate_non_string_content_becomes_none(self) -> None:
+        """Mock-heavy stubs (and some providers) hand back non-str content."""
+        client = _client_with(
+            response=_Response(
+                choices=[
+                    _Choice(message=_MsgStub(content="first")),
+                    _Choice(message=_MsgStub(content=object())),  # type: ignore[arg-type]
+                ]
+            )
+        )
+        m = _model_with(client)
+        resp = await m.complete([Message.user("hi")], n=2)
+        assert resp.candidates[0].content is None
+
+    def test_param_names_fall_back_when_introspection_fails(self, monkeypatch) -> None:
+        """A stale hand-list would block passthrough entirely; the fallback
+        keeps the long-stable parameters reachable."""
+        import typing as _typing
+
+        import tulip.models.native.openai as mod
+
+        def boom(*_a, **_k):
+            raise AttributeError("openai moved its request types")
+
+        monkeypatch.setattr(_typing, "get_type_hints", boom)
+
+        names = mod._openai_param_names()
+        assert "tool_choice" in names
+        assert names == mod._FALLBACK_OPENAI_PARAMS
