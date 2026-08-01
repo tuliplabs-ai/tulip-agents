@@ -25,7 +25,7 @@ class _StreamingModel:
     """Yields chunks, and records whether the loop used stream() or complete()."""
 
     def __init__(self, pieces: list[str] | None = None) -> None:
-        self.pieces = pieces or ["Hel", "lo ", "world"]
+        self.pieces = pieces or ["Hello", " ", "world"]
         self.completed = 0
         self.streamed = 0
 
