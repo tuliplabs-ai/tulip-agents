@@ -118,8 +118,11 @@ class ModelConfig(BaseModel):
 
     model: str
     max_tokens: int = 4096
-    temperature: float = 0.7
-    top_p: float = 0.9
+    # ``None`` means "omit this parameter" so the server's own default applies.
+    # Self-hosted models publish their recommended sampling in
+    # generation_config.json; a value sent unasked silently overrides it.
+    temperature: float | None = 0.7
+    top_p: float | None = 0.9
     stop_sequences: list[str] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}

@@ -314,7 +314,11 @@ class AnthropicModel(BaseModel):
         # wrapper's job here is to keep the agent loop running; callers who
         # need the parameter back can pin to a model that accepts it.
         if not _rejects_temperature(self.config.model):
-            params["temperature"] = kwargs.get("temperature", self.config.temperature)
+            temperature = kwargs.get("temperature", self.config.temperature)
+            # ``None`` means the caller wants the server's default (see
+            # ModelConfig.temperature) — send nothing rather than a value.
+            if temperature is not None:
+                params["temperature"] = temperature
         if system_prompt:
             # When prompt-caching is enabled, send the system prompt as a
             # block list with ``cache_control: ephemeral`` so subsequent
