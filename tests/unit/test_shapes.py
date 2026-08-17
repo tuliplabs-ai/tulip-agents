@@ -18,6 +18,7 @@ import pytest
 
 from tulip.shapes import MAX_BRANCHES, MAX_CODE_LOOPS, shape_tools
 from tulip.testing import ScriptedModel, text
+from tulip.tools.decorator import tool
 
 
 def _model(reply: str = "a finding") -> ScriptedModel:
@@ -258,3 +259,121 @@ async def test_debaters_get_no_tools_by_design() -> None:
     await _tools(model, tools=[lookup])["debate"].execute(question="a or b?")
 
     assert all(not turn for turn in model.offered_tools)
+
+
+# ------------------------------------------------- the check, not the claim --
+
+
+class _Runner:
+    """A stand-in for the host's shell tool.
+
+    Has to be a real Tool: the shapes hand the caller's tools to the agents
+    they build, and those validate. Returns whatever exit status it is told
+    to, so the shape's *decision* can be exercised without running anything.
+    """
+
+    def __init__(self, statuses: list[int]) -> None:
+        self.statuses = statuses
+        self.commands: list[str] = []
+
+        @tool
+        async def bash(command: str) -> str:
+            """Run a shell command.
+
+            Args:
+                command: The command.
+            """
+            self.commands.append(command)
+            status = self.statuses.pop(0) if self.statuses else 1
+            marker = command.rsplit('echo "', maxsplit=1)[-1].split(":", maxsplit=1)[0]
+            return f"some output\n{marker}:{status}"
+
+        self.tool = bash
+
+
+@pytest.mark.asyncio
+async def test_the_code_loop_stops_on_a_passing_check_not_on_the_word_pass() -> None:
+    """The bug this pins, found by running it three times and looking at disk.
+
+    The old loop ended when the model wrote "PASS". Asked to write a file and
+    prove it worked, it printed the code in its reply, declared PASS, and left
+    the directory empty — three times out of three. The word is not evidence.
+    """
+    model = ScriptedModel([text("PASS! definitely done, trust me")], repeat_last=True)
+    runner = _Runner([1, 0])  # first check fails, second passes
+    shape = _tools(model, tools=[runner.tool])["code_until_tests_pass"]
+
+    out = await shape.execute(task="write add()", check="pytest -q")
+
+    assert out.startswith("PASS on round 2"), out[:120]
+    assert len(runner.commands) == 2, "the model's say-so must not end the loop"
+
+
+@pytest.mark.asyncio
+async def test_the_code_loop_reports_failure_rather_than_finding_a_way_to_pass() -> None:
+    model = ScriptedModel([text("PASS all green")], repeat_last=True)
+    runner = _Runner([1, 1, 1, 1])
+    shape = _tools(model, tools=[runner.tool])["code_until_tests_pass"]
+
+    out = await shape.execute(task="write add()", check="pytest -q")
+
+    assert out.startswith("FAIL after"), out[:120]
+    assert len(runner.commands) == 4, "bounded, and it really did keep checking"
+
+
+@pytest.mark.asyncio
+async def test_no_check_means_no_verdict() -> None:
+    """A shape named for a guarantee must not imply one it cannot see."""
+    model = ScriptedModel([text("PASS, done")], repeat_last=True)
+    shape = _tools(model, tools=[_Runner([0]).tool])["code_until_tests_pass"]
+
+    out = await shape.execute(task="write add()")
+
+    assert out.startswith("UNVERIFIED"), out[:120]
+
+
+@pytest.mark.asyncio
+async def test_no_runner_means_no_verdict_either() -> None:
+    # A check that cannot be run is not a check. Running it here instead would
+    # step around whatever gate the host put in front of its own tools.
+    model = ScriptedModel([text("PASS, done")], repeat_last=True)
+    shape = _tools(model, tools=[])["code_until_tests_pass"]
+
+    out = await shape.execute(task="write add()", check="pytest -q")
+
+    assert out.startswith("UNVERIFIED"), out[:120]
+
+
+@pytest.mark.asyncio
+async def test_plan_and_verify_uses_the_check_when_it_is_given_one() -> None:
+    model = _model()
+    runner = _Runner([0])
+    shape = _tools(model, tools=[runner.tool])["plan_and_verify"]
+
+    out = await shape.execute(task="ship it", check="make test")
+
+    assert out.startswith("VERIFIED"), out[:120]
+    assert runner.commands, "the check has to actually run"
+    assert model.call_count == 2, "planner and doer only — no reading stage needed"
+
+
+@pytest.mark.asyncio
+async def test_plan_and_verify_says_unverified_when_it_only_read_the_result() -> None:
+    """It once reported 'Verified: file exists' about a file it never made."""
+    model = _model()
+    shape = _tools(model, tools=[])["plan_and_verify"]
+
+    out = await shape.execute(task="ship it")
+
+    assert out.startswith("UNVERIFIED"), out[:120]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_is_reported_as_failing() -> None:
+    model = _model()
+    runner = _Runner([1])
+    shape = _tools(model, tools=[runner.tool])["plan_and_verify"]
+
+    out = await shape.execute(task="ship it", check="make test")
+
+    assert out.startswith("FAILED VERIFICATION"), out[:120]

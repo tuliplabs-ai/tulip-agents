@@ -65,6 +65,37 @@ MAX_BRANCHES = 6
 MAX_CODE_LOOPS = 4
 
 
+def _find_runner(tools: list[Any]) -> Any | None:
+    """The caller's shell tool, if they gave us one.
+
+    A shape that wants to *check* something has to run something, and running
+    it straight from here would step around whatever gate the host put in front
+    of its own tools — which is the one thing this library exists not to do. So
+    a check goes through the host's runner, or it does not happen and the shape
+    says so.
+    """
+    for candidate in tools:
+        if getattr(candidate, "name", "") in {"bash", "shell", "run_command"}:
+            return candidate
+    return None
+
+
+#: Appended to a check so its exit status is readable whatever the runner
+#: prints. Deciding "did it work" from arbitrary tool output is guesswork; an
+#: explicit marker is not.
+_EXIT_MARKER = "__tulip_check_exit__"
+
+
+async def _run_check(runner: Any, command: str) -> tuple[bool, str]:
+    """Run ``command`` through the host's tool. Returns ``(passed, output)``."""
+    wrapped = f'{command}; echo "{_EXIT_MARKER}:$?"'
+    try:
+        out = str(await runner.execute(command=wrapped))
+    except Exception as exc:  # noqa: BLE001 — refused or broken, either way it failed
+        return False, f"the check could not be run: {type(exc).__name__}: {exc}"
+    return f"{_EXIT_MARKER}:0" in out, out.replace(f"{_EXIT_MARKER}:", "exit status ")
+
+
 def shape_tools(
     model: Any,
     *,
@@ -201,69 +232,102 @@ def shape_tools(
     # -- plan, execute, verify ----------------------------------------------
 
     @tool
-    async def plan_and_verify(task: str, success_criteria: str = "") -> str:
-        """Plan the work, carry it out, then check the result against the plan.
+    async def plan_and_verify(task: str, success_criteria: str = "", check: str = "") -> str:
+        """Plan the work, carry it out, then confirm it actually landed.
 
-        Use for staged work where a missed step is expensive and worth a
-        separate verification pass. Overkill for anything you could simply do —
-        this runs three agents in sequence.
+        Use for staged work where a missed step is expensive. Overkill for
+        anything you could simply do — this runs three agents in sequence.
+
+        If ``check`` is given, the confirmation is that command's exit status.
+        Without one, the last stage is an agent reading the result and
+        reporting — a second opinion, not a verification, and labelled as such.
+        That distinction is not pedantry: asked to create a file, the reading
+        version reported "Verified: file exists" about a file that did not.
 
         Args:
             task: The work to plan, execute and verify.
-            success_criteria: What "done" means. The validator checks against
-                this, so a vague criterion buys a vague check.
+            success_criteria: What "done" means. A vague criterion buys a vague
+                check.
+            check: A shell command that exits 0 when the work is right. This is
+                what turns the last stage from an opinion into a verdict.
         """
         from tulip.agent.composition import SequentialPipeline
 
-        criteria = success_criteria.strip() or "the task is completed as asked"
         planner = _agent(
-            f"You are the planner stage. Produce a concrete numbered plan for "
-            f"the user's task. Success criteria: {criteria}."
+            "The planner stage. You break work into ordered steps. List them plainly, no preamble.",
+            with_tools=False,
         )
-        executor = _agent(
-            "You are the executor stage. Carry out the plan above using the "
-            "available tools. Be decisive."
+        doer = _agent(
+            "The executor stage. You carry out a plan using your tools. Make "
+            "real changes to real files; never describe a change you have not "
+            "made."
         )
-        validator = _agent(
-            f"You are the validator stage. Compare the executor's output against "
-            f"the success criteria: {criteria}. State 'PASS' or 'FAIL: <reason>' "
-            f"on the first line, then summarise."
+        criteria = success_criteria or "the task is completed as asked"
+        await SequentialPipeline(agents=[planner, doer]).run(f"{task}\n\nDone means: {criteria}")
+
+        runner = _find_runner(inner_tools)
+        if check and runner is not None:
+            passed, out = await _run_check(runner, check)
+            verdict = "VERIFIED" if passed else "FAILED VERIFICATION"
+            return f"{verdict} — `{check}`:\n{out[:1500]}"
+
+        reviewer = _agent(
+            "The validator stage. You inspect what was actually done and report "
+            "it. Use your tools to look; do not take anyone's word for it. Say "
+            "plainly what you could and could not confirm."
         )
-        pipeline = SequentialPipeline(agents=[planner, executor, validator])
-        result = await pipeline.run(task)
-        return str(getattr(result, "final_output", "") or "")
+        read = await _text(reviewer, f"Did this happen?\n{task}\n\nDone means: {criteria}")
+        return f"UNVERIFIED (no check given) — a reading, not a verdict:\n\n{read}"
 
     # -- code until the tests pass ------------------------------------------
 
     @tool
-    async def code_until_tests_pass(task: str) -> str:
-        """Write code and keep revising it until it reports PASS.
+    async def code_until_tests_pass(task: str, check: str = "") -> str:
+        """Write code, run a command that decides whether it is right, repeat.
 
-        Use when correctness is checkable — there are tests, or an assertion the
-        output must satisfy. The loop is bounded at four iterations; it stops and
-        reports rather than spinning.
+        Use when correctness is *checkable* — a test command, or an assertion
+        that either exits zero or does not. Bounded at four rounds; it stops
+        and reports rather than spinning.
+
+        The check is the whole point. An earlier version ended a round when the
+        model wrote the word PASS, which is a self-declaration and not a check:
+        asked three times to write a file and prove it worked, it returned the
+        code as prose, said PASS, and wrote nothing at all — three times out of
+        three. What makes this worth more than asking the agent directly is
+        that something other than the model decides when to stop.
 
         Args:
-            task: What to implement, including how success is checked.
+            task: What to implement, and where it should live.
+            check: A shell command that exits 0 when the work is right — a test
+                run, a script, an assertion. Without one this cannot verify
+                anything and says so, rather than claiming a pass it cannot see.
         """
-        from tulip.agent.composition import LoopAgent
-
+        runner = _find_runner(inner_tools)
         coder = _agent(
-            "You are a code-generate-and-test loop. Each iteration:\n"
-            "1. Produce or revise the code to satisfy the request.\n"
-            "2. Use the available tools to run it and its tests.\n"
-            "3. On the very first line, write 'PASS' if all tests passed and "
-            "the spec is met, else 'FAIL: <one-line reason>'.\n"
-            "Keep iterating until you can write PASS."
+            "You write and fix code. You have tools — use them to create and "
+            "edit real files rather than printing code in your reply. After a "
+            "change, say briefly what you changed and where."
         )
-        # ``condition`` signals *stop*, not continue — it is checked as
-        # ``stopped = self.condition(output)``.
-        loop = LoopAgent(
-            agent=coder,
-            max_loops=MAX_CODE_LOOPS,
-            condition=lambda output: str(output).lstrip().startswith("PASS"),
+
+        if not check or runner is None:
+            missing = "no check command was given" if not check else "no shell tool is available"
+            said = await _text(coder, task)
+            return f"UNVERIFIED — {missing}, so nothing confirmed this.\n\n{said}"
+
+        attempt = task
+        last = ""
+        for round_number in range(1, MAX_CODE_LOOPS + 1):
+            await _text(coder, attempt)
+            passed, last = await _run_check(runner, check)
+            if passed:
+                return f"PASS on round {round_number}.\n\n`{check}`:\n{last[:1500]}"
+            attempt = (
+                f"{task}\n\nThe check `{check}` is still failing. Its output:\n"
+                f"{last[:2000]}\n\nFix the actual files and try again."
+            )
+        return (
+            f"FAIL after {MAX_CODE_LOOPS} rounds — `{check}` never passed.\n\n"
+            f"Last output:\n{last[:1500]}"
         )
-        result = await loop.run(task)
-        return str(getattr(result, "final_output", None) or getattr(result, "message", "") or "")
 
     return [fan_out, debate, plan_and_verify, code_until_tests_pass]

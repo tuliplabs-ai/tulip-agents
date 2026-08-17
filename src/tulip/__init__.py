@@ -84,7 +84,6 @@ _LAZY_IMPORTS = {
     # RAG
     "RAGRetriever": ("tulip.rag.retriever", "RAGRetriever"),
     "OpenAIEmbeddings": ("tulip.rag.embeddings.openai", "OpenAIEmbeddings"),
-    # PRISM router — bounded-graph generation atop tulip primitives.
     # Deep research — research-shaped Agent factory + provider protocol.
     # Submodule is ``tulip.deepagent`` (Pythonic path-name convention).
     # Factory is ``create_deepagent`` (matches ``create_orchestrator``,
@@ -198,7 +197,6 @@ __all__ = [
     # RAG (lazy)
     "RAGRetriever",
     "OpenAIEmbeddings",
-    # PRISM router (lazy)
     # Security — evidence-grounded findings (lazy)
     "Abstention",
     "AtlasTechnique",
