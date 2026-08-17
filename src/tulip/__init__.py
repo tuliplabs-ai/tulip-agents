@@ -49,6 +49,7 @@ from tulip.tools.decorator import tool
 
 # Lazy import mapping for optional dependencies
 _LAZY_IMPORTS = {
+    "shape_tools": ("tulip.shapes", "shape_tools"),
     "Agent": ("tulip.agent.agent", "Agent"),
     "AgentConfig": ("tulip.agent.config", "AgentConfig"),
     "AgentResult": ("tulip.agent.result", "AgentResult"),
@@ -84,21 +85,6 @@ _LAZY_IMPORTS = {
     "RAGRetriever": ("tulip.rag.retriever", "RAGRetriever"),
     "OpenAIEmbeddings": ("tulip.rag.embeddings.openai", "OpenAIEmbeddings"),
     # PRISM router — bounded-graph generation atop tulip primitives.
-    "Router": ("tulip.router.runtime", "Router"),
-    "GoalFrame": ("tulip.router.goal_frame", "GoalFrame"),
-    "TaskType": ("tulip.router.goal_frame", "TaskType"),
-    "Risk": ("tulip.router.goal_frame", "Risk"),
-    "Complexity": ("tulip.router.goal_frame", "Complexity"),
-    "Capability": ("tulip.router.capability", "Capability"),
-    "CapabilityIndex": ("tulip.router.capability", "CapabilityIndex"),
-    "Protocol": ("tulip.router.protocol", "Protocol"),
-    "ProtocolRegistry": ("tulip.router.protocol", "ProtocolRegistry"),
-    "PolicyGate": ("tulip.router.policy", "PolicyGate"),
-    "PolicyVerdict": ("tulip.router.policy", "PolicyVerdict"),
-    "CognitiveCompiler": ("tulip.router.compiler", "CognitiveCompiler"),
-    "RunnableResult": ("tulip.router.runnable", "RunnableResult"),
-    "SkillIndex": ("tulip.router.skill_index", "SkillIndex"),
-    "builtin_protocols": ("tulip.router.protocol", "builtin_protocols"),
     # Deep research — research-shaped Agent factory + provider protocol.
     # Submodule is ``tulip.deepagent`` (Pythonic path-name convention).
     # Factory is ``create_deepagent`` (matches ``create_orchestrator``,
@@ -164,8 +150,9 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__version__ = "2.13.0"
+__version__ = "3.0.0"
 __all__ = [
+    "shape_tools",
     "Agent",
     "AgentConfig",
     "AgentResult",
@@ -212,21 +199,6 @@ __all__ = [
     "RAGRetriever",
     "OpenAIEmbeddings",
     # PRISM router (lazy)
-    "Capability",
-    "CapabilityIndex",
-    "CognitiveCompiler",
-    "Complexity",
-    "GoalFrame",
-    "PolicyGate",
-    "PolicyVerdict",
-    "Protocol",
-    "ProtocolRegistry",
-    "Risk",
-    "Router",
-    "RunnableResult",
-    "SkillIndex",
-    "TaskType",
-    "builtin_protocols",
     # Security — evidence-grounded findings (lazy)
     "Abstention",
     "AtlasTechnique",

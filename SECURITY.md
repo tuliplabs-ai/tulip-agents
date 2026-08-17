@@ -23,11 +23,12 @@ Older minors are not backported — upgrade within the major instead, which
 
 | Version                       | Supported          |
 | ----------------------------- | ------------------ |
-| Latest `2.x` minor            | :white_check_mark: |
-| Earlier `2.x` minors          | :x: — upgrade to the latest `2.x` |
+| Latest `3.x` minor            | :white_check_mark: |
+| Earlier `3.x` minors          | :x: — upgrade to the latest `3.x` |
+| `2.x`                         | :x: — 3.0 removed `tulip.router`; see CHANGELOG for the migration |
 | `< 2.0`                       | :x:                |
 
-Pin a major, as in `tulip-agents>=2,<3`, and take the newest minor within it.
+Pin a major, as in `tulip-agents>=3,<4`, and take the newest minor within it.
 Minors ship often, so an enumerated list of supported minors would be stale
 faster than it could be maintained; this table is written to stay correct
 without edits.
