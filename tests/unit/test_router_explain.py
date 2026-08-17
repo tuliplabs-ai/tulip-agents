@@ -247,3 +247,156 @@ def test_explain_contacts_no_model() -> None:
 
     assert isinstance(explanation, RoutingExplanation)
     assert explanation.selected_protocol == "specialist_fanout"
+
+
+# ------------------------------------------------------- through the Router --
+#
+# The compiler tests above cover selection. These cover the Router front door,
+# which is where a caller actually arrives. A ScriptedModel stands in for the
+# extractor so a GoalFrame is produced without contacting anything.
+
+
+def _router(frame_goal: str = "diagnose", *, repeat: bool = False, **compiler_kwargs) -> tuple:
+    """A Router whose extractor is scripted to return one fixed frame."""
+    import json
+
+    from tulip import Agent
+    from tulip.router import Router
+    from tulip.testing import ScriptedModel, text
+
+    payload = json.dumps(
+        {
+            "primary_goal": frame_goal,
+            "secondary_goals": [],
+            "domain": "ops",
+            "complexity": "high",
+            "risk": "medium",
+            "requires_tools": True,
+            "requires_memory": False,
+            "requires_code_generation": False,
+            "requires_multi_agent": True,
+            "approval_required": False,
+            "success_criteria": ["root cause identified"],
+            "required_capabilities": [],
+        }
+    )
+    model = ScriptedModel([text(payload)], repeat_last=repeat)
+    extractor = Agent(model=model, system_prompt="extract", output_schema=GoalFrame)
+    return Router(extractor=extractor, compiler=_compiler(**compiler_kwargs)), model
+
+
+@pytest.mark.asyncio
+async def test_router_explain_extracts_then_explains() -> None:
+    router, model = _router()
+
+    explanation = await router.explain("why did checkout latency double?")
+
+    assert isinstance(explanation, RoutingExplanation)
+    assert explanation.goal == "why did checkout latency double?"
+    assert explanation.goal_frame.primary_goal is TaskType.DIAGNOSE
+    assert explanation.selected_protocol == "specialist_fanout"
+    # exactly one extraction call, and nothing else
+    assert model.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_router_explain_with_a_supplied_frame_spends_no_call_at_all() -> None:
+    router, model = _router()
+
+    explanation = await router.explain("ignored", frame=_frame(TaskType.ANSWER))
+
+    assert explanation.selected_protocol == "direct_response"
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_router_compile_builds_without_executing() -> None:
+    router, model = _router()
+
+    runnable = await router.compile("why did checkout latency double?")
+
+    protocol_id = getattr(runnable, "protocol_id", None) or getattr(
+        getattr(runnable, "inner", None), "protocol_id", None
+    )
+    assert protocol_id == "specialist_fanout"
+    # the extractor ran; the compiled topology did not
+    assert model.call_count == 1
+    assert hasattr(runnable, "execute")
+
+
+@pytest.mark.asyncio
+async def test_router_compile_accepts_a_supplied_frame() -> None:
+    router, model = _router()
+
+    runnable = await router.compile("ignored", frame=_frame(TaskType.ANSWER))
+
+    protocol_id = getattr(runnable, "protocol_id", None) or getattr(
+        getattr(runnable, "inner", None), "protocol_id", None
+    )
+    assert protocol_id == "direct_response"
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_router_explain_and_compile_agree_through_the_front_door() -> None:
+    """Same property as the compiler-level test, at the surface a caller uses."""
+    # explain() and compile() each extract, so the extractor answers twice.
+    router, _ = _router(repeat=True)
+    goal = "why did checkout latency double?"
+
+    explanation = await router.explain(goal)
+    runnable = await router.compile(goal)
+
+    built = getattr(runnable, "protocol_id", None) or getattr(
+        getattr(runnable, "inner", None), "protocol_id", None
+    )
+    assert explanation.selected_protocol == built
+
+
+# --------------------------------------------------- method, with a picker --
+#
+# ``explain`` never calls the picker (that would cost a call and could answer
+# differently next run), but it must still report which arm of the ladder in
+# ``_pick_protocol`` would run, or the ``chosen by`` line would be a lie.
+
+
+def _picker() -> object:
+    """A picker that would explode if called — explain must not call it."""
+
+    class ExplodingPicker:
+        async def pick(self, frame, candidates):  # noqa: ANN001, ANN202
+            raise AssertionError("explain() must not consult the picker")
+
+    return ExplodingPicker()
+
+
+def test_method_is_llm_picked_when_a_picker_faces_several_candidates() -> None:
+    compiler = _compiler(protocol_picker=_picker())
+    # RESEARCH at HIGH complexity leaves more than one survivor
+    explanation = compiler.explain(_frame(TaskType.RESEARCH, Complexity.HIGH, Risk.LOW))
+
+    assert len(explanation.candidates) > 1
+    assert explanation.method == "llm_picked"
+    # and the ranking shown is the fallback the picker would choose among
+    assert explanation.selected_protocol == explanation.candidates[0].protocol_id
+
+
+def test_method_is_single_candidate_when_only_one_survives_the_gates() -> None:
+    compiler = _compiler(protocol_picker=_picker())
+    # HIGH-risk REMEDIATE gates everything except the approval shape
+    explanation = compiler.explain(_frame(TaskType.REMEDIATE, Complexity.MEDIUM, Risk.HIGH))
+
+    assert len(explanation.candidates) == 1
+    assert explanation.method == "single_candidate"
+
+
+def test_method_is_rule_based_without_a_picker() -> None:
+    compiler = _compiler()
+    explanation = compiler.explain(_frame(TaskType.RESEARCH, Complexity.HIGH, Risk.LOW))
+
+    assert explanation.method == "rule_based"
+
+
+def test_available_capabilities_reports_the_synthetic_peer_only_when_configured() -> None:
+    assert "a2a_peer" not in _compiler().available_capabilities()
+    assert "a2a_peer" in _compiler(a2a_endpoint="http://peer.invalid").available_capabilities()
