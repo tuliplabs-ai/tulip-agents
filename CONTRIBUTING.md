@@ -129,7 +129,7 @@ then take the next free number at the end of that range:
 | RAG | 43–45 |
 | Skills, playbooks, plugins | 46–50 |
 | Production | 51–56 |
-| Cognitive router & observability | 57–61 |
+| Observability | 59–61 |
 | Real-world workflows | 62–66 |
 | Server & full pipelines | 67–69 |
 

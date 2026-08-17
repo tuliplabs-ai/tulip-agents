@@ -205,7 +205,7 @@ A bundled `MockModel` means every notebook runs offline with no credentials.
 
 | | |
 |---|---|
-| **[🧭 Cognitive router](https://tulipagents.ai/concepts/router/)** | Describe a task → eight named protocols → the right primitive compiled automatically. The LLM fills a typed schema; routing is deterministic. |
+| **[🧭 Shapes as tools](https://tulipagents.ai/concepts/multi-agent/)** | `fan_out`, `debate`, `plan_and_verify`, `code_until_tests_pass` — multi-agent shapes the loop calls when it has a reason to, not topologies chosen before it starts. |
 | **[🤝 Multi-agent](https://tulipagents.ai/concepts/multi-agent/)** | Seven native patterns + cross-process A2A. One `Agent` class. One event stream. |
 | **[🔬 DeepAgent](https://tulipagents.ai/concepts/deepagent/)** | `create_deepagent` (per-turn grounding) and `create_research_workflow` (StateGraph with post-hoc grounding eval). |
 | **[🪙 MCP](https://tulipagents.ai/concepts/mcp/)** | `MCPClient` consumes MCP servers. `TulipMCPServer` exposes the SDK's tools as MCP. |
