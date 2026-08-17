@@ -8,6 +8,69 @@ policy.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-17
+
+### Removed
+
+- **`tulip.router` (PRISM cognitive routing).** The whole package: `Router`,
+  `CognitiveCompiler`, `ProtocolRegistry`, `Protocol`, `PolicyGate`,
+  `PolicyVerdict`, `CapabilityIndex`, `Capability`, `SkillIndex`, `GoalFrame`,
+  `TaskType`, `Risk`, `Complexity`, `RunnableResult`, `builtin_protocols`, and
+  the `router.*` observability events.
+
+  It was removed because it was measured. A 180-prompt labelled corpus run
+  against two models, with the router's own benchmark asserting that typed
+  routing must beat asking the model directly:
+
+  | | gpt-4o-mini | gpt-5.5 |
+  |---|---|---|
+  | typed router | 85.6% | 86.1% |
+  | ask the model | 82.8% | **87.8%** |
+  | traps not over-routed | 18/26 | 14/26 |
+  | ask the model | 5/26 | **18/26** |
+  | bounded under injection | 100% vs 50% | 100% vs 100% |
+
+  Every advantage shrank or inverted as the model improved. A component whose
+  value is inversely proportional to model quality has a shrinking future, and
+  models only get better.
+
+  The cause was structural rather than a tuning problem: the shape was chosen
+  from the verb in the request, before any evidence existed. Given "Diagnose
+  across logs, metrics and traces: what does the `-v` flag mean?", the
+  classifier correctly reported `complexity=low` and the goal gate then barred
+  the cheapest shape from consideration, because `direct_response` did not
+  declare `diagnose`. Three parallel agents answered a one-line question.
+
+### Added
+
+- **`tulip.shapes.shape_tools()`** — the same multi-agent shapes, rebound as
+  tools the loop may call: `fan_out`, `debate`, `plan_and_verify`,
+  `code_until_tests_pass`. The agent reads the request, tries something, and
+  reaches for machinery when it has a reason to; it can fan out, read the
+  results, and fan out again. A compiled topology got one decision.
+
+  They are ordinary tools, so `admit()` governs them exactly like any other
+  tool call and hooks reach every agent inside them.
+
+### Migration
+
+```python
+# before
+from tulip import Router, CognitiveCompiler, ProtocolRegistry, builtin_protocols
+result = await router.dispatch("Investigate the checkout latency spike")
+
+# after
+from tulip import Agent
+from tulip.shapes import shape_tools
+
+agent = Agent(model=..., tools=[*my_tools, *shape_tools(model=...)])
+result = agent.run_sync("Investigate the checkout latency spike")
+```
+
+The compiled primitives are unchanged and still public — `SequentialPipeline`,
+`ParallelPipeline`, `LoopAgent`, `Orchestrator`, `Swarm`, `Handoff`,
+`StateGraph`, `A2A`. Code that used those directly is unaffected.
+
 ## [2.13.0] - 2026-09-06
 
 ### Added
