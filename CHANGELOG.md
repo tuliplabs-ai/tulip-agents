@@ -8,6 +8,20 @@ policy.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Streaming turned off cost accounting on chat-completions.** With
+  `stream_tokens=True` and an OpenAI chat-completions model,
+  `TerminateEvent.usage` came back `None` while the identical non-streamed
+  run reported full token counts. The API only sends the trailing usage
+  chunk on a stream when asked via `stream_options={"include_usage": True}`,
+  and `stream()` never asked — so the terminal `ModelChunkEvent` carried no
+  usage and the loop's counters stayed at zero for the whole run. `stream()`
+  now requests usage by default; a caller-supplied `stream_options` still
+  reaches the API verbatim. The Responses API stream, the Anthropic stream
+  and `complete()` already reported usage unprompted — this brings the one
+  remaining path level.
+
 ## [2.13.0] - 2026-09-06
 
 ### Added
