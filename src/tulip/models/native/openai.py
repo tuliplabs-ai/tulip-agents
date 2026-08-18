@@ -1334,6 +1334,16 @@ class OpenAIModel(BaseModel):
         self._apply_passthrough(request_kwargs, kwargs)
         self._apply_extra_body(request_kwargs, kwargs)
 
+        # Chat Completions reports usage on a stream only when asked via
+        # ``stream_options`` — without it the trailing usage chunk never
+        # arrives, the terminal ModelChunkEvent carries ``usage=None``, and
+        # the agent loop's token counters stay at zero for the whole run,
+        # so ``TerminateEvent.usage`` is None under ``stream_tokens=True``.
+        # complete() gets usage unconditionally; streaming must ask for it
+        # to stay meterable. ``setdefault`` after passthrough — a caller
+        # who sent their own ``stream_options`` keeps it verbatim.
+        request_kwargs.setdefault("stream_options", {"include_usage": True})
+
         # Track tool calls during streaming
         current_tool_calls: dict[int, dict[str, Any]] = {}
 
