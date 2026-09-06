@@ -205,7 +205,7 @@ A bundled `MockModel` means every notebook runs offline with no credentials.
 
 | | |
 |---|---|
-| **[🧭 Cognitive router](https://tulipagents.ai/concepts/router/)** | Describe a task → eight named protocols → the right primitive compiled automatically. The LLM fills a typed schema; routing is deterministic. |
+| **[🧭 Shapes as tools](https://tulipagents.ai/concepts/multi-agent/)** | `fan_out`, `debate`, `plan_and_verify`, `code_until_tests_pass` — multi-agent shapes the loop calls when it has a reason to, not topologies chosen before it starts. |
 | **[🤝 Multi-agent](https://tulipagents.ai/concepts/multi-agent/)** | Seven native patterns + cross-process A2A. One `Agent` class. One event stream. |
 | **[🔬 DeepAgent](https://tulipagents.ai/concepts/deepagent/)** | `create_deepagent` (per-turn grounding) and `create_research_workflow` (StateGraph with post-hoc grounding eval). |
 | **[🪙 MCP](https://tulipagents.ai/concepts/mcp/)** | `MCPClient` consumes MCP servers. `TulipMCPServer` exposes the SDK's tools as MCP. |
@@ -248,45 +248,45 @@ print(result.title if is_finding(result) else f"withheld: {result.reason}")
 
 ---
 
-## The cognitive router and multi-agent shapes
+## Multi-agent shapes, as tools
 
-Describe a task in plain language; the **[cognitive router](https://tulipagents.ai/concepts/router/)**
-(PRISM) runs an LLM classifier that fills a typed `GoalFrame`, matches it to one of eight
-coordination protocols, and compiles the matching runtime primitive. **The model classifies;
-routing is deterministic — it never authors the topology.**
-
-| Protocol | Compiled shape | Best for |
-|---|---|---|
-| `direct_response` | Single `Agent` | `ANSWER`, `EXPLAIN` |
-| `plan_execute_validate` | `SequentialPipeline` (planner → executor → validator) | `PLAN`, `BUILD`, `MODIFY` |
-| `specialist_fanout` | `ParallelPipeline` of N tool-bound Agents | `DIAGNOSE`, `MONITOR` |
-| `debate` | Two debaters + judge `Agent` | `COMPARE` |
-| `codegen_test_validate` | `LoopAgent` (stops on `PASS`) | `GENERATE_CODE` |
-| `approval_gated_execution` | `Agent` wrapped in approval interrupt | `ESCALATE`, `REMEDIATE` |
-| `handoff_chain` | `SequentialPipeline` of one-tool Agents | `COORDINATE` |
-| `a2a_delegate` | Cross-process agent-to-agent call (opt-in) | distributed meshes |
-
-Each shape is also a first-class primitive you can use directly — `SequentialPipeline`,
-`ParallelPipeline`, `LoopAgent`, `Orchestrator`, `Swarm`, `Handoff`, `StateGraph`, `A2A`.
+A fan-out, a debate, a plan-then-verify pipeline, a code-until-tests-pass loop.
+They are **tools your agent may call**, not topologies chosen for it in advance.
 
 ```python
-import asyncio
+from tulip import Agent
+from tulip.shapes import shape_tools
 
-from tulip.agent import Agent, SequentialPipeline
-
-
-async def main():
-    result = await SequentialPipeline(agents=[draft, check, finalize]).run(
-        "Summarize the trade-offs of moving the checkout service to a queue."
-    )
-    print(result.final_output)
-
-
-asyncio.run(main())
+agent = Agent(
+    model="openai:gpt-5.5",
+    tools=[*my_tools, *shape_tools(model="openai:gpt-5.5")],
+)
 ```
 
-→ [Cognitive router](https://tulipagents.ai/concepts/router/) ·
-[All patterns](https://tulipagents.ai/concepts/multi-agent/)
+| Tool | Shape | Reach for it when |
+|---|---|---|
+| `fan_out(task, aspects)` | N agents in parallel | the question splits into strands that do not depend on each other |
+| `debate(question)` | two debaters + a judge | the trade-off is genuinely contested |
+| `plan_and_verify(task, criteria)` | planner → executor → validator | a missed step is expensive and worth a separate check |
+| `code_until_tests_pass(task)` | bounded loop, stops on `PASS` | correctness is checkable |
+
+**Why tools and not a router.** Tulip used to pick the shape up front, from a
+typed classification of the request. We benchmarked it: 180 labelled prompts,
+two models. Choosing before any evidence exists is the wrong moment to choose —
+`"Diagnose across logs, metrics and traces: what does the -v flag mean?"` got
+three parallel agents for a one-line answer. Every advantage the router had
+also shrank as the model improved. Late binding lets the agent try something
+first, then reach for machinery when it has a reason to, and fan out twice if
+the first round earns it.
+
+Each shape is also a plain primitive you can use directly —
+`SequentialPipeline`, `ParallelPipeline`, `LoopAgent`, `Orchestrator`, `Swarm`,
+`Handoff`, `StateGraph`, `A2A`.
+
+They are ordinary tools, so [`admit()`](#the-admission-gate) governs them
+exactly like any other tool call, and hooks reach every agent inside them.
+
+→ [Multi-agent patterns](https://tulipagents.ai/concepts/multi-agent/)
 
 ---
 
@@ -348,7 +348,6 @@ git clone https://github.com/tuliplabs-ai/tulip-agents.git
 cd tulip-agents && pip install -e .
 
 python examples/notebook_06_basic_agent.py           # your first agent
-python examples/notebook_58_cognitive_router.py      # the cognitive router
 python examples/notebook_69_research_workflow.py     # full research pipeline
 ```
 
@@ -407,7 +406,7 @@ src/tulip/
 ├── agent/          Agent runtime, config, Sequential / Parallel / Loop pipelines
 ├── core/           AgentState, Message, events, termination algebra, Send
 ├── loop/           ReAct nodes (Think, Execute, Reflect)
-├── router/         Cognitive router — GoalFrame, ProtocolRegistry, PolicyGate, Compiler
+├── shapes.py       Multi-agent shapes as tools — fan_out, debate, plan_and_verify
 ├── reasoning/      Reflexion, Grounding, Causal, GSAR
 ├── multiagent/     Orchestrator, Swarm, Handoff, StateGraph, Functional
 ├── a2a/            Cross-process Agent-to-Agent protocol

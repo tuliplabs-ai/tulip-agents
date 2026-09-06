@@ -9,7 +9,7 @@ are the smallest possible shapes; the numbered `notebook_*.py` files build
 them out.
 
 **A note on the numbers.** They are stable identifiers, not a sequence. The
-series runs `06-09 · 11-40 · 45-52 · 55-88`, and the gaps are not missing
+series runs `06-09 · 11-33 · 35-40 · 45-52 · 55-57 · 59-88`, and the gaps are not missing
 files — those numbers never existed. Numbers are never reused or reassigned,
 so a link, a bookmark, or a cross-reference from another notebook keeps
 pointing at the same example forever; renumbering to close the gaps would
