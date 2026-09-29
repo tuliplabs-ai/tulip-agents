@@ -155,9 +155,9 @@ class AfterModelCallEvent(ProtectedEvent):
 
     Writable fields:
         retry: Set True to discard response and re-call the model.
-        retry_feedback: With ``retry``, text the re-call sees as a system
-            message after the messages that were sent — why the response was
-            discarded. Sent for that re-call only: it never enters the run's
+        retry_feedback: With ``retry``, text the re-call sees as an
+            automated user-role note after the messages that were sent — why
+            the response was discarded. Sent for that re-call only: it never enters the run's
             state, a checkpoint or the result.
         response: Replace the model response.
 
