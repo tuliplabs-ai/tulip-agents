@@ -11,6 +11,7 @@ once; and a segment cut off halfway is never run a second time.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -27,8 +28,10 @@ from tulip.core.messages import Message, Role  # noqa: E402
 from tulip.durable.dbos import (  # noqa: E402
     InterruptedSegmentError,
     pending_decision,
+    redispatch_stalled_runs,
     register_agents,
     signal_decided,
+    stalled_runs,
     start_agent_run,
 )
 from tulip.durable.segments import SegmentError, run_agent_segment  # noqa: E402
@@ -150,6 +153,34 @@ async def test_a_paused_run_survives_a_restart(system_db: str, tmp_path: Path) -
     assert outcome.status == "done"
     assert refunds == [250.0]
     assert handle.workflow_id == "w2"
+
+
+@pytest.mark.asyncio
+async def test_a_decision_nothing_took_is_read_once_the_run_is_dispatched_again(
+    system_db: str, tmp_path: Path
+) -> None:
+    """The run was taken by a process that then left (a rolling deploy's old pod); the decision
+    sent to it lies unread until the run is dispatched again, and the refund runs once."""
+    refunds: list[float] = []
+    name = _name()
+    register_agents({name: _refund_agent(tmp_path, refunds)})
+    _launch(system_db)
+    await start_agent_run(agent=name, prompt="refund o1", thread_id="t8", workflow_id="w8")
+    pending = await _wait_for_pause("w8")
+    DBOS.destroy()
+    with sqlite3.connect(system_db.removeprefix("sqlite:///")) as db:
+        db.execute("UPDATE workflow_status SET executor_id = 'old-pod' WHERE workflow_uuid = 'w8'")
+    _launch(system_db)
+
+    FileApprovals(tmp_path / "approvals.json").decide(pending.approval_id, "approved", by="alice")
+    await signal_decided("w8")
+    await asyncio.sleep(1.0)
+    assert refunds == []  # nobody took it
+    assert await stalled_runs(older_than=0) == ["w8"]
+    assert await redispatch_stalled_runs(older_than=0) == ["w8"]
+    outcome = await (await DBOS.retrieve_workflow_async("w8")).get_result()
+    assert outcome.status == "done"
+    assert refunds == [250.0]
 
 
 @pytest.mark.asyncio
