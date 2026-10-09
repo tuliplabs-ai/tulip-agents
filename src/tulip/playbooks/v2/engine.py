@@ -1152,6 +1152,31 @@ class PlaybookRuntime(HookProvider):
         self._owners.setdefault(tool, []).append(owner.id)
         return ""
 
+    def release(self, tool: str) -> bool:
+        """The latest admitted call to ``tool`` did not run: take its admission back.
+
+        A call is counted against its step's ``max_tool_calls`` when it is admitted (the
+        before-hook), and credited as the step's work when it finishes. A call that is
+        admitted and then held for a person (a gate's hold, a held network request)
+        does neither: it pauses the run instead of finishing. Without this its
+        admission stayed counted, so a step with ``max_tool_calls: 1`` refused its own
+        approved call as ``too_many_calls`` when the call was performed or re-emitted
+        after the approval.
+
+        The caller (the gate that held the call) says so; the call is then counted
+        once, when it is admitted again. ``False`` when no admission of ``tool`` is
+        waiting for its result (nothing to take back). ``ask_user`` never counts, so
+        only its attribution is dropped.
+        """
+        owners = self._owners.get(tool)
+        if not owners:
+            return False
+        step_id = owners.pop()
+        work = self._work.get(step_id)
+        if tool != ASK_USER and work is not None and work.attempts > 0:
+            work.attempts -= 1
+        return True
+
     def _credit(self, tool: str, result: Any, *, error: Any = None) -> None:
         """Attribute a finished call to the step it was admitted under."""
         owners = self._owners.get(tool) or []

@@ -8,6 +8,16 @@ policy.
 
 ## [Unreleased]
 
+### Added
+
+- **`PlaybookRuntime.release(tool)`: a held call is not one of its step's calls.** A v2
+  runtime counts a call against its step's `max_tool_calls` when it is admitted, before a
+  gate weighs it. A call the gate then held never ran, but stayed counted, so a step with
+  `max_tool_calls: 1` and an approval refused its own approved call as `too_many_calls`
+  when it was performed after the approval. The gate that held it now takes the admission
+  back with `release(tool)`, and the call is counted once, when it is admitted again.
+  `False` when no admission of the tool is waiting for its result.
+
 ## [2.25.0] - 2026-10-09
 
 ### Added
