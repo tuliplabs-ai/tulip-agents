@@ -23,6 +23,118 @@ policy.
   `resume_workflow`); the run replays its recorded steps, reads the message and
   goes on. A run inside a segment (no pause on record) is never touched.
 
+## [2.25.2] - 2026-10-09
+
+### Fixed
+
+- **A box run survives OpenShell cutting its connections.** OpenShell cuts a box's
+  connections whenever the box's policy generation moves on, and the first settings poll
+  after start always moves it (`provider_env_changed`, about 10 s in). A model turn still
+  streaming then broke (`L7 tunnel closed before inspection because policy changed: policy
+  generation is stale`), and the OpenAI client never retries a stream that broke after it
+  began: the run ended `APIConnectionError: Connection error.` (live F29/F30 on dev, about
+  one box run in three that lasted past 10 s).
+  - `OpenAIModel(stream_reconnects=n)` (default 0, unchanged): each turn is read whole and
+    asked again when its connection drops part way, up to `n` times; partial output is never
+    yielded, so no turn is seen twice. A refusal (any HTTP status, e.g. a box guard's
+    `token_budget_exhausted`) is never asked again. The box runner turns it on (3).
+  - The runner's gateway client sends again a call the box's network cut, when that is
+    safe: any call that never connected, and reads, checkpoints and event batches (deduped
+    by `seq_from`). An admission, a gateway tool or a result is never sent twice.
+
+## [2.25.1] - 2026-10-09
+
+### Fixed
+
+- **A call held for its step's approver runs once approved.** `PlaybookRuntime.pause()`
+  now releases the admission of a call that was admitted but had not finished -- the call
+  held for the person. Before, the redelivered call counted a second time: a step with
+  `max_tool_calls: 1` refused its own approved call (`too_many_calls`) and then could not
+  close (`insufficient_effort`), so the approved action never ran (live F38/F39 on dev).
+  A call that finished before the pause still counts.
+
+## [2.25.0] - 2026-10-09
+
+### Added
+
+- **A playbook v2 runtime can be restored from its own step events.**
+  `PlaybookRuntime.restore(events)` takes a run's `playbook_step` payloads, as the engine
+  emitted them, in order, and puts a fresh runtime where they left it, emitting nothing:
+  each step's last status, why a waived step was waived, the calls each step made (and
+  whether it deviated), a done step's outputs (a later branch's `when` reads them), and the
+  targets each finished router took (its record's `enabled_steps`, else the targets that
+  were not waived). It returns a `RestoreResult` (`records`, `statuses`, `active`), and the
+  runtime then reports `restored` and counts as started. It is all or nothing: a record
+  that is not a mapping, names another playbook or an unknown step, or carries an unknown
+  status, no step records at all, or a step with no record raises `RestoreError` (with
+  `reason`) and changes nothing. `PlaybookRuntime.hold_unstarted()` is for a caller that
+  then fails closed: it counts as started without recording a step tree. A run that moves
+  pods resumes in the step it was in, so a step's approval still holds the calls made in it;
+  the gateway did this by writing the runtime's private fields and now has an API for it.
+  `RestoreError`, `RestoreResult`, `STATUSES` and `RESTORED_CALL` are exported from
+  `tulip.playbooks.v2`. Playbook events are unchanged.
+
+## [2.24.1] - 2026-10-09
+
+### Fixed
+
+- **A resumed box runner numbers its events on.** A runner resumed after a hold is a new
+  process, and it numbered its events from 0 again; the gateway drops a batch whose numbers
+  it has seen, so the first events after a resume (the approved call's start, its result and
+  its `harness.exec` record) never reached the run's record. The runner now leaves its next
+  event number in `/sandbox/.tulip/events.seq` and the next runner of the run starts from it.
+- **The box runner keeps no connection alive.** NVIDIA OpenShell closes a kept-alive tunnel
+  once the box's policy generation moves on, and a command resolving a new host is enough
+  (`L7 tunnel closed before inspection because policy changed: policy generation is stale`).
+  A turn whose tool calls resolved two hosts left the runner's pooled model connection stale,
+  and its next model call failed with `APIConnectionError: Connection error.` The runner's
+  model client and gateway client now open a connection per request
+  (`OpenAIModel(keepalive=False)`, a new option, on by default elsewhere).
+
+## [2.24.0] - 2026-10-09
+
+### Added
+
+- **A playbook v2 step may name who approves it.** A step takes an optional
+  `approval: {by, ask, show}`: `by` is an approvals grant label, `ask` the plain text
+  the approver reads, `show` the call's arguments to put in front of them first. The
+  engine parses it into `StepApproval` (exported from `tulip.playbooks.v2`) on
+  `Step.approval`, tolerantly: without a non-empty string `by` it reads as no approval
+  (the registry validates the shape strictly at publish). The gateway compiles it into a
+  hold on that step's tool calls only. Playbook events are unchanged.
+- **`PlaybookRuntime.owner_of(tool)` and `PlaybookRuntime.active_steps()`**: the active
+  step a call would be attributed to, and the steps active now -- so a caller can find
+  the approval that governs a call before it runs.
+
+## [2.23.1] - 2026-10-08
+
+### Fixed
+
+- **A box runner can reach its gateway inside NVIDIA OpenShell.** The runner made
+  itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`) to keep its token and
+  placeholders from its commands. OpenShell identifies the process behind every DNS
+  lookup and connection through `/proc/<pid>` (`require_binary_identity`) and cannot
+  identify a non-dumpable one, so it refused the runner's lookups: every box run ended
+  at once with `ConnectError` (`Temporary failure in name resolution`) on
+  `GET /internal/v1/runner/next`, exit code 1, nothing logged.
+  - The runner now stays dumpable and, once its runtime is built and before any
+    command can run, wipes the token and every placeholder out of its initial
+    environment block (what `/proc/<pid>/environ` shows) and out of `os.environ`
+    (`tulip.runner.harden.protect`, `wipe_initial_environ`). Commands still never
+    inherit them; reading the runner's memory needs ptrace, which Yama refuses a child.
+  - `TULIP_RUNNER_HARDEN=non-dumpable` keeps the old behaviour for a sandbox that does
+    not identify processes that way.
+- **The runner keeps a log in the workspace** (`/sandbox/.tulip/runner.log`), so its
+  gateway can show why a box ended without a report. It holds no values.
+
+### Changed
+
+- **`tulip-runner.pyz` is no longer attached to GitHub releases.** The release
+  still builds it (and checks that it starts) for the private
+  `ghcr.io/tuliplabs-ai/tulip-runner` image. Anyone else builds it from the
+  published wheel with `scripts/build_runner_pyz.sh`; a Tulip gateway builds its
+  own at image build time.
+
 ## [2.23.0] - 2026-10-08
 
 ### Added

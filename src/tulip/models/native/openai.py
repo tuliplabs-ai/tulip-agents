@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -527,6 +528,23 @@ class OpenAIConfig(ModelConfig):
         gt=0,
         description="Per-request timeout in seconds.",
     )
+    stream_reconnects: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Ask a streamed turn again when its connection drops part way, up to this many "
+            "times; the turn is then read whole before it is yielded. 0 (default) streams "
+            "live with no reconnect. On inside an NVIDIA OpenShell box (the box runner)."
+        ),
+    )
+    keepalive: bool = Field(
+        default=True,
+        description=(
+            "Reuse connections between requests. Off inside an NVIDIA OpenShell box: its "
+            "proxy closes a kept-alive tunnel once the box's policy generation moves on "
+            "(any new DNS mapping does), so a reused connection fails the next call."
+        ),
+    )
 
     # OpenAI-specific settings
     frequency_penalty: float = 0.0
@@ -553,6 +571,32 @@ class OpenAIConfig(ModelConfig):
             "unreachable through the SDK."
         ),
     )
+
+
+#: First wait before a dropped stream is asked again; it doubles, capped at 4 s.
+STREAM_RECONNECT_BASE_DELAY = 0.5
+
+
+def _is_disconnect(exc: BaseException) -> bool:
+    """Whether ``exc`` is a dropped connection rather than an answer from the server.
+
+    ``openai.APIConnectionError`` (``APITimeoutError`` is one) and httpx transport errors
+    are; any HTTP status (``openai.APIStatusError``) is the server's answer and is not.
+    """
+    try:
+        import openai
+    except ImportError:  # pragma: no cover — the provider is installed with its extra
+        openai = None  # type: ignore[assignment]
+    if openai is not None:
+        if isinstance(exc, openai.APIStatusError):
+            return False
+        if isinstance(exc, openai.APIConnectionError):
+            return True
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, httpx.TransportError)
 
 
 class OpenAIModel(BaseModel):
@@ -703,6 +747,16 @@ class OpenAIModel(BaseModel):
         def build() -> openai.AsyncOpenAI:
             import openai  # noqa: PLC0415
 
+            http_client = None
+            if not self.config.keepalive:
+                import sys  # noqa: PLC0415
+
+                # A fresh connection per request: nothing pooled can go stale. The limits
+                # come from the HTTP library this openai release's client is built on
+                # (httpx2 from openai 3.x, httpx before), whatever else is installed.
+                http_lib = sys.modules[openai.DefaultAsyncHttpxClient.__mro__[1].__module__]
+                limits = http_lib.Limits(max_keepalive_connections=0)
+                http_client = openai.DefaultAsyncHttpxClient(limits=limits)
             return openai.AsyncOpenAI(
                 api_key=self.config.api_key,
                 base_url=self.config.base_url,
@@ -710,6 +764,7 @@ class OpenAIModel(BaseModel):
                 default_headers=self.config.default_headers,
                 max_retries=self.config.max_retries,
                 timeout=self.config.request_timeout,
+                http_client=http_client,
             )
 
         return loop_bound(self, "_client", build)
@@ -1586,8 +1641,52 @@ class OpenAIModel(BaseModel):
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[ModelChunkEvent]:
+        """Stream a chat response.
+
+        With ``stream_reconnects`` (0 by default) each turn is read whole before any of it
+        is yielded, and a turn whose connection drops part way is asked again, up to that
+        many times. Partial output is never yielded, so the caller never sees half a turn
+        twice. Inside an NVIDIA OpenShell box a connection is cut whenever the box's policy
+        generation moves on (its first settings poll after start does so), and the OpenAI
+        client retries a request that failed but never a stream that broke after it began.
+        A refusal (an HTTP status, e.g. a guard's ``token_budget_exhausted``) is not retried.
         """
-        Stream a chat response.
+        if self.config.stream_reconnects <= 0:
+            async for event in self._stream_once(messages, tools, **kwargs):
+                yield event
+            return
+        attempt = 0
+        while True:
+            turn: list[ModelChunkEvent] = []
+            try:
+                async for event in self._stream_once(messages, tools, **kwargs):
+                    turn.append(event)
+            except Exception as exc:
+                if attempt >= self.config.stream_reconnects or not _is_disconnect(exc):
+                    raise
+                attempt += 1
+                delay = min(STREAM_RECONNECT_BASE_DELAY * (2 ** (attempt - 1)), 4.0)
+                logger.warning(
+                    "model stream dropped (%s); asking again in %.1fs (%d/%d)",
+                    type(exc).__name__,
+                    delay,
+                    attempt,
+                    self.config.stream_reconnects,
+                )
+                await asyncio.sleep(delay)
+                continue
+            for event in turn:
+                yield event
+            return
+
+    async def _stream_once(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ModelChunkEvent]:
+        """
+        Stream a chat response (one request).
 
         Args:
             messages: Conversation history

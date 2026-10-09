@@ -80,6 +80,9 @@ __all__ = [
 #: The box's persistent workspace.
 DEFAULT_WORKSPACE = "/sandbox"
 
+#: How many times a model turn whose connection drops part way is asked again.
+MODEL_STREAM_RECONNECTS = 3
+
 #: The secret argument a decision token reaches an MCP or API tool body under.
 TOKEN_ARGUMENT = "__tulip_decision__"  # noqa: S105 — an argument name, not a secret
 
@@ -330,6 +333,14 @@ def _model(manifest: RunManifest, environ: Mapping[str, str]) -> Any:
         base_url=route.base_url,
         api_key=placeholder,
         default_headers={"Accept-Encoding": "identity"},
+        # OpenShell closes a kept-alive tunnel once the box's policy generation moves on
+        # (a command resolving a new host is enough); a reused connection would fail the
+        # next model call with "Connection error".
+        keepalive=False,
+        # The same cut can land on a turn still streaming: the box's first settings poll
+        # (about 10 s after start) moves the generation on, and the OpenAI client never
+        # retries a stream that broke after it began. Read each turn whole, ask again.
+        stream_reconnects=MODEL_STREAM_RECONNECTS,
     )
 
 
