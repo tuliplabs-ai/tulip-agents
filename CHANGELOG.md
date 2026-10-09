@@ -8,6 +8,21 @@ policy.
 
 ## [Unreleased]
 
+### Added
+
+- **A durable run nothing runs is found and dispatched again.**
+  `tulip.durable.dbos.stalled_runs`, `redispatch_run` and
+  `redispatch_stalled_runs`. DBOS's launch puts the runs left pending under its
+  executor id back on its internal queue, and any live process of the app may
+  take them: during a rolling deploy (two processes, both `local`) the old one
+  can take a paused graph or agent run and then exit, leaving it pending with
+  no execution anywhere, its resume or decision kept unread until the next
+  launch (seen in production: three approvals that did nothing for minutes).
+  `redispatch_stalled_runs(older_than=30)` finds the runs paused at their wait
+  with a message unread that long and dispatches each again (DBOS's
+  `resume_workflow`); the run replays its recorded steps, reads the message and
+  goes on. A run inside a segment (no pause on record) is never touched.
+
 ## [2.25.2] - 2026-10-09
 
 ### Fixed

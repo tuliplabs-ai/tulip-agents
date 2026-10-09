@@ -54,6 +54,25 @@ segment runs with its own copy of the graph's config, so one registered graph
 serves any number of runs at once. A segment runs at most once, as an agent's
 does: a node interrupted by a dying process is not run a second time.
 
+**A run nothing runs.** DBOS recovers, at launch, the runs left pending under
+its executor id by putting them back on its internal queue, and any live
+process of the application may take them from there. Two processes with the
+same executor id at once (the default, ``local``, in every process: a rolling
+deploy's old and new pods) can leave a paused run held by the one that then
+exits: the run stays pending, its resume or decision is kept unread, and
+nothing wakes it until the next launch. :func:`redispatch_stalled_runs` finds
+the runs paused at their wait with a message unread for ``older_than`` seconds
+and dispatches each again (DBOS's ``resume_workflow``): taken by a live
+process, the run replays its recorded steps to the wait, reads the message and
+goes on. Call it now and then (every half minute), or
+:func:`redispatch_run` a few seconds after sending one run its value. A run
+inside a segment has no pause on record and is never dispatched again, since a
+segment runs at most once::
+
+    await resume_graph(workflow_id, {"approved": True})
+    await asyncio.sleep(5)
+    await redispatch_run(workflow_id)  # False: the run took it
+
 **Where the state lives.** The local default needs nothing but the machine:
 DBOS on SQLite and a file checkpointer. In production both live in Postgres.
 Neither DBOS's tables nor a checkpointer's carry a tenant column, so a
@@ -64,6 +83,8 @@ and workflow ids per tenant.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from dbos import DBOS, SetWorkflowID
@@ -278,6 +299,89 @@ async def resume_graph(workflow_id: str, value: Any) -> None:
     await DBOS.send_async(workflow_id, {"value": value}, topic=GRAPH_RESUME_TOPIC)
 
 
+# --- runs nothing runs ----------------------------------------------------------
+
+#: Each kind of run, by DBOS's workflow name: the topic it waits on, the event its pause is in.
+_WAITS = {
+    "TulipGraphRun": (GRAPH_RESUME_TOPIC, GRAPH_PENDING_EVENT),
+    "TulipAgentRun": (DECISION_TOPIC, PENDING_EVENT),
+}
+
+
+def _unread(older_than: float, workflow_id: str | None = None) -> list[tuple[str, str]]:
+    """Pending runs with a message on their topic unread for ``older_than`` seconds."""
+    import sqlalchemy as sa
+    from dbos._dbos import _get_dbos_instance
+    from dbos._schemas.system_database import SystemSchema
+
+    ws, n = SystemSchema.workflow_status, SystemSchema.notifications
+    cutoff = int((time.time() - older_than) * 1000)
+    query = (
+        sa.select(ws.c.workflow_uuid, ws.c.name)
+        .distinct()
+        .select_from(ws.join(n, n.c.destination_uuid == ws.c.workflow_uuid))
+        .where(
+            ws.c.status == "PENDING",
+            n.c.consumed == False,  # noqa: E712 - SQL, not Python
+            n.c.created_at_epoch_ms <= cutoff,
+            sa.or_(
+                *(
+                    sa.and_(ws.c.name == name, n.c.topic == topic)
+                    for name, (topic, _) in _WAITS.items()
+                )
+            ),
+        )
+    )
+    if workflow_id is not None:
+        query = query.where(ws.c.workflow_uuid == workflow_id)
+    # DBOS has no public read of its messages; its system tables are the record.
+    with _get_dbos_instance()._sys_db.engine.begin() as c:  # noqa: SLF001
+        return [(str(row[0]), str(row[1])) for row in c.execute(query)]
+
+
+async def _find(older_than: float, workflow_id: str | None = None) -> list[tuple[str, str]]:
+    # On DBOS's own pool, as its async calls run theirs: a relaunch shuts the old one down.
+    from dbos._dbos import _get_dbos_instance
+
+    pool = _get_dbos_instance()._executor  # noqa: SLF001
+    return await asyncio.get_running_loop().run_in_executor(pool, _unread, older_than, workflow_id)
+
+
+async def _paused(workflow_id: str, name: str) -> bool:
+    event = _WAITS[name][1]
+    return await DBOS.get_event_async(workflow_id, event, timeout_seconds=0) is not None
+
+
+async def stalled_runs(*, older_than: float = 30.0) -> list[str]:
+    """Runs paused at their wait with a resume or decision unread for ``older_than`` seconds."""
+    return [w for w, name in await _find(older_than) if await _paused(w, name)]
+
+
+async def redispatch_run(workflow_id: str, *, older_than: float = 0.0) -> bool:
+    """Dispatch a paused run again when a message to it has lain unread ``older_than`` seconds.
+
+    Returns whether it was. A run that took its message, is inside a segment, or
+    has ended is left alone.
+    """
+    found = await _find(older_than, workflow_id)
+    if not found or not await _paused(workflow_id, found[0][1]):
+        return False
+    DBOS.logger.warning(
+        f"tulip: run {workflow_id} is paused with a message nobody has read; dispatching it again"
+    )
+    await DBOS.resume_workflow_async(workflow_id)
+    return True
+
+
+async def redispatch_stalled_runs(*, older_than: float = 30.0) -> list[str]:
+    """Every run :func:`stalled_runs` finds, dispatched again; their workflow ids."""
+    return [
+        w
+        for w in await stalled_runs(older_than=older_than)
+        if await redispatch_run(w, older_than=older_than)
+    ]
+
+
 __all__ = [
     "DECISION_TOPIC",
     "GRAPH_PENDING_EVENT",
@@ -289,12 +393,15 @@ __all__ = [
     "graph_workflow",
     "pending_decision",
     "pending_interrupt",
+    "redispatch_run",
+    "redispatch_stalled_runs",
     "register_agents",
     "register_graphs",
     "resume_graph",
     "run_graph_segment",
     "run_segment",
     "signal_decided",
+    "stalled_runs",
     "start_agent_run",
     "start_graph_run",
 ]
