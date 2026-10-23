@@ -31,13 +31,36 @@ Two rules worth knowing:
   ``selected_branch_ids contains tx_locking`` means the string ``"tx_locking"``.
 * A path that does not resolve is ``null``. Ordering comparisons against ``null`` (or
   between values that cannot be ordered) are false, never an error.
+
+**Withheld values.** A run restored from a trace kept under ``metadata_only`` custody
+does not have the outputs of the steps it closed before it moved: the trace holds a digest
+(``{"redacted": true, "sha256": ..., "bytes": ...}``, the gateway's ``persist._digest``) in
+their place. Those read as :data:`UNAVAILABLE`, and :func:`when_verdict` answers a
+condition that reads one -- any path that resolves to a withheld value, passes through one
+or holds one -- with :data:`UNKNOWN`, never true or false: a digest is not the data it
+digests, and ``null`` would be a lie about it. :func:`evaluate_when` keeps its yes/no
+answer (unknown is not true).
+
+**Typed values.** The runtime puts a typed field's value in the context as a typed value
+(:func:`tulip.playbooks.v2.fields.typed_value`), and comparisons honour the type:
+
+* a :class:`Money` value compares by its amount -- with a number (``inputs.amount >
+  10000``) or with money in the same currency. Ordering two amounts in different
+  currencies is :data:`UNKNOWN` (the run holds rather than guess at an exchange rate);
+  they are never equal. Its parts read as paths (``inputs.amount.currency``);
+* a :class:`Day` value (a date) compares chronologically with another date, or with a
+  date written ``'YYYY-MM-DD'``; ordered against anything else it is false;
+* a number compares numerically, as it always has.
+
+A context with no typed value in it is evaluated exactly as the registry's copy does.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 
@@ -45,6 +68,13 @@ from typing import Any
 MAX_WHEN_LENGTH = 500
 #: The deepest nesting of parentheses and NOTs accepted.
 MAX_WHEN_DEPTH = 32
+#: How deep a value is searched for a withheld member before it is taken as withheld.
+_MAX_VALUE_DEPTH = 64
+
+#: What :func:`when_verdict` answers.
+TRUE = "true"
+FALSE = "false"
+UNKNOWN = "unknown"
 
 _KEYWORDS = frozenset(
     {"and", "or", "not", "contains", "equals", "is", "empty", "always", "true", "false", "null"}
@@ -325,6 +355,181 @@ def when_paths(node: Node) -> list[str]:
     return seen
 
 
+# ── withheld values ──────────────────────────────────────────────────────────
+
+
+class Unavailable:
+    """A value the run once had and cannot see now (see :data:`UNAVAILABLE`).
+
+    One instance, :data:`UNAVAILABLE`; copies are the same instance. Test for it with
+    :func:`is_withheld`, which also recognizes the trace's digest objects.
+    """
+
+    _instance: Unavailable | None = None
+
+    def __new__(cls) -> Unavailable:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __copy__(self) -> Unavailable:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Unavailable:
+        return self
+
+    def __reduce__(self) -> str:
+        return "UNAVAILABLE"
+
+    def __repr__(self) -> str:
+        return "UNAVAILABLE"
+
+
+#: Stands in for a step output the run cannot see: a condition that reads it is unknown.
+UNAVAILABLE = Unavailable()
+
+
+def is_digest(value: Any) -> bool:
+    """Whether ``value`` is a trace digest in place of a body (the gateway's ``_digest``).
+
+    ``{"redacted": true, "sha256": "<hex>", "bytes": <n>}``: read as a digest whenever
+    ``redacted`` is ``true`` and ``sha256`` is text, so a digest that grows a field still
+    reads as one.
+    """
+    return (
+        isinstance(value, Mapping)
+        and value.get("redacted") is True
+        and isinstance(value.get("sha256"), str)
+    )
+
+
+def is_withheld(value: Any) -> bool:
+    """Whether ``value`` is :data:`UNAVAILABLE` or a trace digest: not data to decide on."""
+    return isinstance(value, Unavailable) or is_digest(value)
+
+
+def _holds_withheld(value: Any, depth: int = 0) -> bool:
+    if is_withheld(value):
+        return True
+    if depth >= _MAX_VALUE_DEPTH:
+        return True  # too deep to look through: not known to be whole
+    if isinstance(value, Mapping):
+        return any(_holds_withheld(v, depth + 1) for v in value.values())
+    if isinstance(value, list | tuple | set | frozenset):
+        return any(_holds_withheld(v, depth + 1) for v in value)
+    return False
+
+
+def _reads_withheld(context: Mapping[str, Any], dotted: str) -> bool:
+    """Whether ``dotted`` resolves to, passes through, or holds a withheld value."""
+    current: Any = context
+    for part in dotted.split("."):
+        if is_withheld(current):
+            return True
+        if isinstance(current, Mapping):
+            if part not in current:
+                return False
+            current = current[part]
+        elif isinstance(current, Sequence) and not isinstance(current, str) and part.isdigit():
+            index = int(part)
+            if index >= len(current):
+                return False
+            current = current[index]
+        else:
+            return False
+    return _holds_withheld(current)
+
+
+# ── typed values ─────────────────────────────────────────────────────────────
+
+
+class Money(Mapping[str, Any]):
+    """An amount of money in one currency: a money field's value, as a condition reads it.
+
+    A read-only mapping of ``amount`` and ``currency``, so ``<path>.amount`` and
+    ``<path>.currency`` resolve, and it equals the plain ``{"amount", "currency"}`` value it
+    stands for. Comparisons read the amount (see the module's *Typed values*).
+    """
+
+    __slots__ = ("_amount", "_currency")
+
+    def __init__(self, amount: float, currency: str) -> None:
+        self._amount = amount
+        self._currency = currency
+
+    @property
+    def amount(self) -> float:
+        return self._amount
+
+    @property
+    def currency(self) -> str:
+        return self._currency
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "amount":
+            return self._amount
+        if key == "currency":
+            return self._currency
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("amount", "currency"))
+
+    def __len__(self) -> int:
+        return 2
+
+    def __repr__(self) -> str:
+        return f"Money({self._amount!r}, {self._currency!r})"
+
+
+class Day(str):
+    """A date field's value (``YYYY-MM-DD``), as a condition reads it: ordered as a date."""
+
+    __slots__ = ()
+
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ORDERING = frozenset({">", "<", ">=", "<="})
+
+
+class _UndecidableError(Exception):
+    """A comparison that cannot be told true or false: two currencies, ordered."""
+
+
+def _as_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not _ISO_DATE.match(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _typed(op: str, left: Any, right: Any) -> tuple[Any, Any]:
+    """The two sides of a comparison as their types compare them (see *Typed values*)."""
+    if isinstance(left, Money) and isinstance(right, Money):
+        if left.currency == right.currency:
+            return left.amount, right.amount
+        if op in _ORDERING:
+            raise _UndecidableError
+        return left, right  # never equal: they differ in currency
+    if isinstance(left, Money) and _number(right):
+        return left.amount, right
+    if isinstance(right, Money) and _number(left):
+        return left, right.amount
+    if isinstance(left, Day) or isinstance(right, Day):
+        left_day, right_day = _as_date(left), _as_date(right)
+        if left_day is not None and right_day is not None:
+            return left_day, right_day
+        if op in _ORDERING:
+            return None, None  # a date orders only against a date
+    return left, right
+
+
 # ── evaluation ───────────────────────────────────────────────────────────────
 
 
@@ -352,6 +557,7 @@ def _value(context: Mapping[str, Any], operand: Operand) -> Any:
 
 
 def _compare(op: str, left: Any, right: Any) -> bool:
+    left, right = _typed(op, left, right)
     if op == "==":
         return bool(left == right)
     if op == "!=":
@@ -401,26 +607,57 @@ def _eval(node: Node, context: Mapping[str, Any]) -> bool:
         return _is_empty(_value(context, node.operand)) != node.negate
     if isinstance(node, Not):
         return not _eval(node.operand, context)
-    if isinstance(node, AllOf):
-        return all(_eval(part, context) for part in node.operands)
-    return any(_eval(part, context) for part in node.operands)
+    # Every part is evaluated, so an undecidable one is found whatever the others say.
+    results = [_eval(part, context) for part in node.operands]
+    return all(results) if isinstance(node, AllOf) else any(results)
+
+
+def when_verdict(condition: str | Node, context: Mapping[str, Any]) -> str:
+    """:data:`TRUE`, :data:`FALSE` or :data:`UNKNOWN`: whether ``condition`` holds.
+
+    :data:`UNKNOWN` when any path the condition reads resolves to a withheld value
+    (:func:`is_withheld`), passes through one, or holds one -- whatever the rest of the
+    condition says: an answer that rests on part of it would still be a guess about what
+    the withheld value was. :data:`UNKNOWN` too when the condition orders two amounts of
+    money in different currencies, wherever in the condition it does so. Never raises: a
+    condition that does not parse is false.
+    """
+    try:
+        node = parse_when(condition) if isinstance(condition, str) else condition
+        if any(_reads_withheld(context, path) for path in when_paths(node)):
+            return UNKNOWN
+        return TRUE if _eval(node, context) else FALSE
+    except _UndecidableError:
+        return UNKNOWN
+    except (WhenSyntaxError, RecursionError):
+        return FALSE
 
 
 def evaluate_when(condition: str | Node, context: Mapping[str, Any]) -> bool:
-    """Whether ``condition`` holds against ``context``. Never raises: bad input is false."""
-    try:
-        node = parse_when(condition) if isinstance(condition, str) else condition
-        return _eval(node, context)
-    except (WhenSyntaxError, RecursionError):
-        return False
+    """Whether ``condition`` holds against ``context``. Never raises: bad input is false.
+
+    A condition :func:`when_verdict` calls :data:`UNKNOWN` does not hold here; a caller
+    that must tell "false" from "cannot tell" asks :func:`when_verdict`.
+    """
+    return when_verdict(condition, context) == TRUE
 
 
 __all__ = [
+    "FALSE",
     "MAX_WHEN_DEPTH",
     "MAX_WHEN_LENGTH",
+    "TRUE",
+    "UNAVAILABLE",
+    "UNKNOWN",
+    "Day",
+    "Money",
     "Node",
+    "Unavailable",
     "WhenSyntaxError",
     "evaluate_when",
+    "is_digest",
+    "is_withheld",
     "parse_when",
     "when_paths",
+    "when_verdict",
 ]

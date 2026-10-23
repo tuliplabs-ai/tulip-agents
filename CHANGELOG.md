@@ -23,6 +23,214 @@ policy.
   `resume_workflow`); the run replays its recorded steps, reads the message and
   goes on. A run inside a segment (no pause on record) is never touched.
 
+## [2.28.0] - 2026-10-10
+
+### Added
+
+- **Playbooks v2: task steps a person completes.** A step with `kind: task` is a person's,
+  not the model's (`tulip.playbooks.v2.tasks`):
+
+  ```yaml
+  - id: confirm_by_phone
+    kind: task
+    title: Call the vendor back on the number on file
+    instructions: Use the number in the vendor master, never one from the request.
+    assignee: {by: ap-clerks}            # allow_requester: true lets the requester do it
+    form: [{name: confirmed_by, type: text, sensitive: false}, {name: call_recording, type: file}]
+    due: 8h
+    escalate_to: ap-leads
+  ```
+
+  - Read tolerantly into a frozen `TaskSpec` (`assignee: TaskAssignee {by, allow_requester}`,
+    `form`, `instructions`, `due`, `due_seconds`, `escalate_to`) on `Step.task`
+    (`Step.is_task`). A task step has no tools whatever its definition says, and its form is
+    its outputs (so a branch's `when` reads `confirmed`, a later one `outputs.<task>.confirmed`).
+  - The model cannot act in it: `complete_step` and `select_branches` on a task step are
+    refused ("This step is done by a person: confirm_by_phone (AP Clerks). The run waits
+    until they complete it."), and while only task steps are active every other call is
+    refused and recorded as a blocked deviation, whatever the enforcement mode. Its brief and
+    the playbook outline say a person does it.
+  - `PlaybookRuntime.pending_task()` -> `TaskRequest | None` (`step_id`, `title`,
+    `instructions`, `form`, `assignee`, `due_seconds`, `escalate_to`): the task step active
+    now, for the gateway to file the task hold and park the run. `TaskRequest.hold_fields()`
+    gives `approver_groups` (the assignee, one completion), `only_named_groups`,
+    `escalate_to_label`, `ttl_seconds`, `escalate_after_seconds` and `task` (the step, its
+    instructions, the form as plain fields, `allow_requester`).
+  - `PlaybookRuntime.complete_task(step_id, values, by)`: the values are checked against the
+    form in the registry's words (`form_problems`; `validate_value`'s sentences, "Spoke with
+    is required." for a required field left out, "The form has no field named 'notes'." for
+    a stray one, a file only as a `{ref, name, size?, media_type?}` reference). A refusal
+    changes nothing and lists each bad value under `invalid`. Valid values become the
+    step's typed outputs, the step closes `done` and routes on by its branches' conditions
+    (`routing: "unknown"` when one cannot be told, as for `complete_step`). The
+    `playbook_step` `done` event of a task step carries one new field, `completed_by`.
+  - The briefs of the steps after a task step show what the person gave: the
+    `sensitive: false` values as given, the others named but not shown, and a value the run
+    restored as a digest said to be unavailable.
+  - A task step's outputs restore like any step's: withheld when the trace holds a digest,
+    supplied with `restore(outputs=...)`; a task that was waiting restores waiting.
+- **Playbooks v2: `notify` rules, read.** `PlaybookV2.notify_rules` is the playbook's
+  `notify` (else -- when it is missing or empty, as the registry stores every playbook with
+  `notify: []` -- `metadata.notify`), read as the registry's notice dispatcher reads it, into
+  frozen `NotifyRule`s (`on`, `to: NotifyTarget {kind: by | requester | slack, name}`,
+  `steps`, `include`; `applies(event, step_id)`). The engine sends nothing: the registry
+  does.
+
+## [2.27.0] - 2026-10-10
+
+### Added
+
+- **Playbooks v2: a step's approval rules, picked from the process data and the call.** A
+  step's `approval` grows `rules` -- first match wins, the default rule (no `when`) last --
+  and `only_these_approvers`, the registry's `StepApprovalRule` (`tulip.playbooks.v2.approvals`):
+
+  ```yaml
+  approval:
+    rules:
+      - when: "inputs.amount > 10000"
+        all_of: [{by: finance, count: 1}, {by: cfo, count: 1}]
+        due: 4h
+        escalate_to: finance-leads
+      - by: finance
+        count: 1
+        due: 24h
+    only_these_approvers: true
+  ```
+
+  - `StepApproval.rules` are frozen `ApprovalRule`s (`groups` of `(label, count)`, `when`,
+    `due_seconds`, `escalate_to`). The old `by` is one default rule, so `StepApproval(by=...)`
+    reads as before and `by` stays set for readers that know only it. Reading stays tolerant:
+    a rule naming no group is left out, a count below 1 reads as 1, an unreadable `due` as
+    none; a `when` that does not parse keeps its rule and reads as `unknown`.
+  - `PlaybookRuntime.approval_for(tool, args)` -> `ResolvedApproval | None`: for the step
+    that owns the call, each rule's `when` is read against the step's typed context
+    (`inputs.<name>`, `outputs.<step>.<name>`) plus the call's arguments (`args.<name>`; a
+    money value compares as money). The first true rule applies. A rule that is `unknown` --
+    a withheld value, two currencies ordered, an argument ordered against a number that is
+    not a number (missing, or `"20000"` as text), a `when` that does not parse -- means the
+    STRICTEST of it and the rules after it (most approvers in all, the first on a tie), never
+    a laxer one; no match and no default means the strictest rule. The result carries
+    `groups`, `due_seconds`, `escalate_to`, `only_named`, `ask`, `show`, `rule_index`,
+    `matched` and a plain `reason` ("The amount is more than $10,000, so Finance and CFO must
+    both approve."); `hold_fields()` gives the registry hold's `approver_groups`,
+    `only_named_groups`, `escalate_to_label`, `ttl_seconds` and `escalate_after_seconds`
+    (never `approver_labels`; see Fixed). `pick_rule()` is
+    the same choice, pure.
+  - `parse_duration("30m" | "4h" | "2d")` -> seconds.
+  - `authority_from_resolved(resolved, roles_of=..., members=..., also=..., break_glass=...)`
+    -> an `ApprovalAuthority` that enforces it in the open-source stores: one rule per group
+    with the group's count as quorum (all of them), distinct people, each approval counting
+    for one group only; `only_named` keeps general approvers (`also`) out, break-glass roles
+    stay in. Pinned by `tests/unit/playbooks_v2/fixtures/approval_rules.json`, written here
+    until the registry's copy of the vectors lands.
+- **`ApprovalAuthority(count_once=True)`**: each approval counts toward one rule only, the
+  first still short of its quorum that the approver holds; an approver whose rules have all
+  counted while another waits is refused ("Finance already counted; this approval needs
+  someone from CFO"). A denial is never narrowed. `ApproverRule.name` names a rule in that
+  refusal. Off by default.
+- **An approval store's `authority` may be per record**: `InMemoryApprovals` and
+  `FileApprovals` take a callable `(ApprovalRecord) -> ApprovalAuthority | None` beside a
+  single authority (`authority_for(record)` says which applies). `ApprovalAuthority.check()`
+  takes the decision's `verdict`.
+
+### Fixed
+
+- **Playbooks v2: a branch's condition decides; the model cannot choose against the data.**
+  The live dev suite (F40) caught a model calling `select_branches` on a step whose two
+  branches read typed data (`inputs.amount > 10000` / `NOT (inputs.amount > 10000)`): the
+  trace said `routed_by: "select_branches"`, so a model could take the branch meant for
+  small amounts on a large one and skip the approval the other branch's step carries. Now
+  every branch whose `when` the run can tell decides by it:
+  - `select_branches` against a known verdict is refused in plain words ("This step routes
+    by its conditions: the amount is more than $10,000, so it goes to Large invoice."); a
+    choice that agrees is accepted and the step is recorded as `routed_by: "when"`.
+  - A condition on the step's own outputs cannot be judged before `complete_step` gives
+    them: the choice is taken, then set aside where the outputs go against it (the result
+    says so under `selection_set_aside`), and the step routes by its conditions.
+  - Choosing stays for the branches without a condition (`always`) and for conditions the
+    run cannot tell (`unknown`: a withheld output, a missing input), as before; a choice
+    must still agree with the verdicts the run can tell.
+  - The step brief and the playbook prose tell the model the routing is automatic when the
+    conditions decide. `StepGraph.condition_verdicts()`, `StepGraph.conditions_decide()`
+    and `Branch.conditioned` say it in code.
+- **Playbooks v2: `ResolvedApproval.hold_fields()` no longer names the groups as
+  `approver_labels`.** On the registry an approver label makes its holders general
+  approvers who count for ANY group, so with `only_these_approvers: false` two Finance
+  people could have satisfied "Finance and CFO". The hold now carries only
+  `approver_groups`, `only_named_groups`, `escalate_to_label`, and -- with a `due` --
+  `ttl_seconds` (twice the due when the hold escalates, so the escalation gets its turn;
+  the due otherwise) and `escalate_after_seconds` (the due, only with `escalate_to`).
+
+## [2.26.0] - 2026-10-10
+
+### Fixed
+
+- **A restored v2 playbook run never mistakes a digest for data.** Under the gateway's
+  `metadata_only` custody a mirrored `playbook_step` record holds a digest
+  (`{"redacted": true, "sha256", "bytes"}`) where a step's `outputs` were. Before,
+  `PlaybookRuntime.restore()` put that digest back as if it were the outputs, and a later
+  branch reading `outputs.<step>.<name>` routed on it: every such path resolved `null`, so
+  the run took (or waived) branches on a guess.
+  - A closed step whose record holds its outputs as a digest -- or not at all, as a
+    `not_executed` one never does -- is restored with its outputs UNAVAILABLE; so is a
+    single output value held as a digest. `PlaybookRuntime.unavailable_outputs()` and
+    `RestoreResult.unavailable` name those steps.
+  - The `when` language answers a condition that reads a withheld value `unknown`
+    (`when_verdict()`; `evaluate_when()` still answers yes/no, and unknown is not yes).
+    `StepGraph.branch_verdicts()` gives each branch's `true`/`false`/`unknown`.
+  - `complete_step` on a step with an `unknown` branch refuses to route and changes
+    nothing: `{"ok": false, "routing": "unknown", "branches_unknown": [...],
+    "unavailable": [...]}`, which the gateway can turn into a hold. An explicit
+    `select_branches` still routes.
+  - `restore(events, outputs={step_id: {...}})` takes the real values from a caller that
+    holds them (the gateway's data-plane checkpoint). They are checked against the record:
+    their digest must be the record's `sha256` (or equal its plain outputs), else
+    `RestoreError`.
+  - A record whose `verified` is a digest restores the step unverified (a digest is not a
+    yes). Under `metadata_only` the steps active at the move therefore emit
+    `verified: false` afterwards, until the gateway passes `verified` through as shape.
+- **A step that declares questions closes only with their answers.** A step with
+  `required_from_user` now closes only when each declared name is in its outputs and not
+  blank; calling `ask_user` once no longer stands in for the answers. The refusal names
+  what is missing.
+
+### Added
+
+- **Playbooks v2: typed process data.** A v2 playbook declares its data as typed fields,
+  the registry's `PlaybookField` (`tulip.playbooks.v2.fields.Field`): `name`, `label`,
+  `type` (`text | number | money | date | boolean | choice | email | url | file`),
+  `choices`, `required`, `sensitive` (default `true`) and `description`.
+  - `inputs` are fields (`PlaybookV2.input_fields`); an old `{name, description,
+    required}` input still reads as a sensitive text field, and `PlaybookV2.inputs` keeps
+    its `(name, description)` pairs. A step's `outputs: [field]` sits beside the old
+    `expected_outputs: [str]` (each a text field); `Step.output_fields()` merges them the
+    registry's way, and `Step.data_fields()` adds the answers. `required_from_user[].field`
+    types a question's answer. Reading stays tolerant: an unknown type reads as text.
+  - `complete_step` checks every typed output and typed answer with
+    `validate_value(field, value)` -- a port of the registry's, same sentences -- and
+    refuses with `{"ok": false, "invalid": {name: sentence}}`, listing every bad field at
+    once. Money is `{amount, currency}` with an ISO 4217 code; a date is `YYYY-MM-DD`; a
+    file is `{ref, name, size?, media_type?}`, never bytes. A required typed output must
+    be present. Untyped `expected_outputs` accept any value, as before.
+  - `PlaybookRuntime.set_inputs(values)` (or `start(inputs=...)`) gives a run its inputs
+    and returns what was wrong with them (`validate_inputs`, the registry's run-start
+    check). Conditions read them as `inputs.<name>`. Money compares by amount -- with a
+    number (`inputs.amount > 10000`) or money in the same currency; ordering two
+    currencies is `unknown`. Dates compare chronologically, numbers numerically
+    (`when.Money`, `when.Day`). A required input not given, an invalid one or a digest
+    is UNAVAILABLE, so a branch reading it is `unknown` and `complete_step` refuses to
+    route (`"unavailable_inputs": [...]`); a restored run needs its inputs set again.
+  - `PlaybookRuntime.public_outputs(step_id)` and `public_inputs()` return only the valid
+    values of `sensitive: false` fields, for the gateway to mirror in clear while it
+    digests the rest. No event gains a field.
+  - A step's brief tells the model how to write each typed value.
+
+- **Declared questions are told apart from the agent's own**, for a per-run `ask_user`
+  budget: `PlaybookRuntime.declared_question(step_id, name)` and
+  `PlaybookRuntime.ask_is_declared()` -- asked before the call is admitted, true for the
+  first `n` asks of an active step that declares `n` questions, false after that. A
+  declared ask is attributed to the step that declares it.
+
 ## [2.25.2] - 2026-10-09
 
 ### Fixed

@@ -319,13 +319,22 @@ def test_no_branch_taken_waives_the_group_and_the_join_still_opens() -> None:
     assert run.status("decide") == ACTIVE
 
 
-def test_select_branches_routes_by_id_and_wins_over_the_outputs() -> None:
+def test_select_branches_routes_by_id_but_yields_to_the_outputs() -> None:
     run = _Run()
     picked = run.rt.select_branches("triage", ["amount"], "the totals differ")
-    assert picked["ok"]
+    assert picked["ok"]  # triage's conditions read its own outputs: not given yet
     assert picked["waives"] == ["duplicate"]
-    result = run.triage()  # its outputs would have taken `duplicate`
-    assert result["routed_by"] == "select_branches"
+    result = run.triage()  # its outputs take `duplicate`: the conditions decide
+    assert result["routed_by"] == "when"
+    assert result["branches_taken"] == ["duplicate"]
+    assert "set aside" in result["selection_set_aside"]
+    assert run.status("check_duplicates") == ACTIVE
+    assert run.status("check_amount") == WAIVED
+    run = _Run()
+    assert run.rt.select_branches("triage", ["amount"], "the totals differ")["ok"]
+    result = run.triage(selected_branch_ids=["amount_mismatch"])  # outputs agree
+    assert result["routed_by"] == "when"
+    assert "selection_set_aside" not in result
     assert run.status("check_amount") == ACTIVE
     assert run.status("check_duplicates") == WAIVED
 
@@ -504,7 +513,13 @@ def test_complete_step_wants_the_person_s_answers() -> None:
     assert not result["ok"]
     assert result["missing"] == ["customer_statement"]
     run.call("ask_user")
-    assert run.rt.complete_step("triage", {"dispute_kind": "x", "selected_branch_ids": []})["ok"]
+    # Asking is not answering: the answer itself must be in the outputs.
+    again = run.rt.complete_step("triage", {"dispute_kind": "x", "selected_branch_ids": []})
+    assert not again["ok"]
+    assert again["missing"] == ["customer_statement"]
+    assert "customer_statement" in again["error"]
+    owed = {"dispute_kind": "x", "selected_branch_ids": []}
+    assert run.rt.complete_step("triage", {**owed, "customer_statement": "charged twice"})["ok"]
 
 
 def test_complete_step_only_closes_an_active_step() -> None:

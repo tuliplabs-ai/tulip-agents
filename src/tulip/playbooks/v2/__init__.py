@@ -4,12 +4,23 @@
 """v2 playbooks: a step graph the model walks with three control tools.
 
 The engine that runs a ``playbook.v2`` definition (:mod:`tulip.playbooks.v2.engine`), the
-safe ``when`` condition language its branches route on (:mod:`tulip.playbooks.v2.when`)
+safe ``when`` condition language its branches route on (:mod:`tulip.playbooks.v2.when`),
+who approves a step's calls (:mod:`tulip.playbooks.v2.approvals`),
+the typed fields its process data is declared with (:mod:`tulip.playbooks.v2.fields`),
+the steps a person does (:mod:`tulip.playbooks.v2.tasks`), who is told what
+(:mod:`tulip.playbooks.v2.notify`)
 and the result shapes it reads (:mod:`tulip.playbooks.v2.results`). Pure: no I/O, no
 environment, no clock. The same code runs next to the agent loop wherever that loop is --
 in the gateway, or in a box runner -- and the gateway's copy is the authoritative one.
 """
 
+from tulip.playbooks.v2.approvals import (
+    ApprovalRule,
+    ResolvedApproval,
+    authority_from_resolved,
+    parse_duration,
+    pick_rule,
+)
 from tulip.playbooks.v2.engine import (
     ACTIVE,
     ASK_USER,
@@ -26,6 +37,7 @@ from tulip.playbooks.v2.engine import (
     PROPOSAL_TOOLS,
     RECORD,
     RESTORED_CALL,
+    ROUTING_UNKNOWN,
     STATUSES,
     STEP_EVENT,
     TERMINAL,
@@ -47,15 +59,31 @@ from tulip.playbooks.v2.engine import (
     playbook_prose,
     skills_by_name,
     step_brief,
+    validate_inputs,
     with_forbidden,
 )
+from tulip.playbooks.v2.fields import FIELD_TYPES, Field, validate_value
+from tulip.playbooks.v2.notify import NOTIFY_EVENTS, NotifyRule, NotifyTarget, parse_notify_rules
 from tulip.playbooks.v2.results import (
     DENIAL_PREFIX,
     not_executed_reason,
     not_executed_result,
     refused,
 )
-from tulip.playbooks.v2.when import WhenSyntaxError, evaluate_when, parse_when, when_paths
+from tulip.playbooks.v2.tasks import TaskAssignee, TaskRequest, TaskSpec, form_problems
+from tulip.playbooks.v2.when import (
+    UNAVAILABLE,
+    UNKNOWN,
+    Day,
+    Money,
+    WhenSyntaxError,
+    evaluate_when,
+    is_digest,
+    is_withheld,
+    parse_when,
+    when_paths,
+    when_verdict,
+)
 
 
 __all__ = [
@@ -68,40 +96,65 @@ __all__ = [
     "DENIAL_PREFIX",
     "DEVIATION_EVENT",
     "DONE",
+    "FIELD_TYPES",
     "INCONCLUSIVE",
+    "NOTIFY_EVENTS",
     "NOT_EXECUTED",
     "PENDING",
     "PLAYBOOK_V2",
     "PROPOSAL_TOOLS",
     "RECORD",
     "RESTORED_CALL",
+    "ROUTING_UNKNOWN",
     "STATUSES",
     "STEP_EVENT",
     "TERMINAL",
+    "UNAVAILABLE",
+    "UNKNOWN",
     "WAIVED",
+    "ApprovalRule",
+    "Day",
+    "Field",
+    "Money",
+    "NotifyRule",
+    "NotifyTarget",
     "PlaybookRuntime",
     "PlaybookV2",
     "PlaybookV2Error",
+    "ResolvedApproval",
     "RestoreError",
     "RestoreResult",
     "StepApproval",
     "StepGraph",
+    "TaskAssignee",
+    "TaskRequest",
+    "TaskSpec",
     "WhenSyntaxError",
+    "authority_from_resolved",
     "control_tool",
     "definition_digest",
     "enforcement_mode",
     "evaluate_when",
     "forbidden_deny",
+    "form_problems",
     "initial_active",
+    "is_digest",
     "is_playbook_v2",
+    "is_withheld",
     "not_executed_reason",
     "not_executed_result",
+    "parse_duration",
+    "parse_notify_rules",
     "parse_playbook_v2",
     "parse_when",
+    "pick_rule",
     "playbook_prose",
     "refused",
     "skills_by_name",
     "step_brief",
+    "validate_inputs",
+    "validate_value",
     "when_paths",
+    "when_verdict",
     "with_forbidden",
 ]
