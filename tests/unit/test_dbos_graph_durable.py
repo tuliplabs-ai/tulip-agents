@@ -11,6 +11,7 @@ checkpoint, across a restart if it must; a segment cut off halfway is never run 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -26,8 +27,11 @@ from tulip.durable.dbos import (  # noqa: E402
     GraphSegmentOutcome,
     InterruptedSegmentError,
     pending_interrupt,
+    redispatch_run,
+    redispatch_stalled_runs,
     register_graphs,
     resume_graph,
+    stalled_runs,
     start_graph_run,
 )
 from tulip.durable.segments import SegmentError, run_graph  # noqa: E402
@@ -155,6 +159,99 @@ async def test_a_paused_graph_survives_a_restart(system_db: str, tmp_path: Path)
     assert outcome.status == "done"
     assert outcome.state["published"] is False
     assert effects == ["draft 3"]
+
+
+def _taken_by_a_process_that_left(url: str, workflow_id: str) -> None:
+    """What a rolling deploy leaves: the new process's launch puts the paused run back on the
+    queue, the old one (still up, with the same executor id) takes it, then exits. The run is
+    pending under an execution no process has, and this process's launch does not recover it."""
+    DBOS.destroy()
+    with sqlite3.connect(url.removeprefix("sqlite:///")) as db:
+        db.execute(
+            "UPDATE workflow_status SET executor_id = 'old-pod' WHERE workflow_uuid = ?",
+            (workflow_id,),
+        )
+    _launch(url)
+
+
+@pytest.mark.asyncio
+async def test_a_run_nothing_runs_is_found_and_dispatched_again(
+    system_db: str, tmp_path: Path
+) -> None:
+    effects: list[str] = []
+    name = _name()
+    register_graphs({name: _review_graph(tmp_path, effects)})
+    _launch(system_db)
+    await start_graph_run(graph=name, inputs={"request": 4}, thread_id="t6", workflow_id="w6")
+    await _wait_for_pause("w6", "job")
+    _taken_by_a_process_that_left(system_db, "w6")
+    assert await stalled_runs(older_than=0) == []  # paused, but nothing sent to it
+
+    await resume_graph("w6", "plan-6")
+    await asyncio.sleep(1.0)
+    paused = await pending_interrupt("w6")  # nobody took it
+    assert paused is not None
+    assert paused.node == "job"
+    assert await stalled_runs(older_than=0) == ["w6"]
+    assert await redispatch_stalled_runs(older_than=30) == []  # not half a minute old yet
+
+    assert await redispatch_stalled_runs(older_than=0) == ["w6"]
+    paused = await _wait_for_pause("w6", "review")
+    assert paused.state["result"] == "plan-6"
+    assert await stalled_runs(older_than=0) == []
+    assert await redispatch_run("w6") is False  # it took its message
+
+    await resume_graph("w6", "yes")
+    outcome = await (await DBOS.retrieve_workflow_async("w6")).get_result()
+    assert outcome.status == "done"
+    assert effects == ["draft 4", "publish 4:plan-6"]  # every node once
+    assert await redispatch_run("w6") is False  # ended
+
+
+@pytest.mark.asyncio
+async def test_a_run_inside_a_segment_is_never_dispatched_again(
+    system_db: str, tmp_path: Path
+) -> None:
+    """A message sent while the run works (kept for its next pause) is not a stall: the run is
+    not paused, so nothing dispatches it again, and its node runs once."""
+    started: list[str] = []
+    finish = asyncio.Event()
+    name = _name()
+
+    async def busy(state: dict[str, Any]) -> dict[str, Any]:
+        started.append("busy")
+        await finish.wait()
+        return {}
+
+    async def job(state: dict[str, Any]) -> dict[str, Any]:
+        return {"result": interrupt({"waiting": "job"})}
+
+    def make() -> StateGraph:
+        g = StateGraph()
+        g.add_node("busy", busy)
+        g.add_node("job", job)
+        g.add_edge(START, "busy")
+        g.add_edge("busy", "job")
+        g.add_edge("job", END)
+        g.compile(checkpointer=FileCheckpointer(tmp_path / "checkpoints"))
+        return g
+
+    register_graphs({name: make})
+    _launch(system_db)
+    handle = await start_graph_run(graph=name, inputs={}, thread_id="t7")
+    for _ in range(200):
+        if started:
+            break
+        await asyncio.sleep(0.05)
+    await resume_graph(handle.workflow_id, "early")
+    await asyncio.sleep(0.2)
+    assert await stalled_runs(older_than=0) == []
+    assert await redispatch_run(handle.workflow_id) is False
+    finish.set()
+    outcome = await handle.get_result()
+    assert outcome.status == "done"
+    assert outcome.state["result"] == "early"
+    assert started == ["busy"]
 
 
 @pytest.mark.asyncio
