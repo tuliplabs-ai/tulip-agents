@@ -27,26 +27,26 @@ from tulip.testing import ScriptedModel, text
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
 
 
-def _at(message: Message, days_ago: float) -> Message:
-    when = (NOW - timedelta(days=days_ago)).isoformat()
+def _at(message: Message, days_ago: float, now: datetime = NOW) -> Message:
+    when = (now - timedelta(days=days_ago)).isoformat()
     return message.model_copy(update={"metadata": {MESSAGE_TIME_KEY: when}})
 
 
-def _thread() -> AgentState:
-    """Three exchanges, 40, 20 and 0 days old; the oldest has a tool call."""
+def _thread(now: datetime = NOW) -> AgentState:
+    """Three exchanges, 40, 20 and 0 days before ``now``; the oldest has a tool call."""
     call = ToolCall(id="c1", name="lookup", arguments={})
     return AgentState(
         messages=(
             Message.system("you help"),
-            _at(Message.user("old question"), 40),
-            _at(Message.assistant(tool_calls=[call]), 40),
-            _at(Message.tool(ToolResult(tool_call_id="c1", name="lookup", content="42")), 40),
-            _at(Message.assistant("old answer"), 40),
-            _at(Message.system("summary of earlier turns"), 25),
-            _at(Message.user("middle question"), 20),
-            _at(Message.assistant("middle answer"), 20),
-            _at(Message.user("new question"), 0),
-            _at(Message.assistant("new answer"), 0),
+            _at(Message.user("old question"), 40, now),
+            _at(Message.assistant(tool_calls=[call]), 40, now),
+            _at(Message.tool(ToolResult(tool_call_id="c1", name="lookup", content="42")), 40, now),
+            _at(Message.assistant("old answer"), 40, now),
+            _at(Message.system("summary of earlier turns"), 25, now),
+            _at(Message.user("middle question"), 20, now),
+            _at(Message.assistant("middle answer"), 20, now),
+            _at(Message.user("new question"), 0, now),
+            _at(Message.assistant("new answer"), 0, now),
         )
     )
 
@@ -110,7 +110,8 @@ def test_message_time_ignores_garbage() -> None:
 async def test_retained_checkpointer_trims_the_local_default() -> None:
     inner = MemoryCheckpointer()
     cp = RetainedCheckpointer(inner, max_age=timedelta(days=30))
-    await cp.save(_thread(), "t1")
+    # save() trims against the wall clock, so the thread is dated from it too.
+    await cp.save(_thread(datetime.now(UTC)), "t1")
     loaded = await cp.load("t1")
     assert loaded is not None
     assert "old question" not in _texts(loaded)
