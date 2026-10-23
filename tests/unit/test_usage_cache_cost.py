@@ -197,7 +197,7 @@ async def test_a_bearer_token_never_sends_an_anthropic_key_from_the_environment(
 
 async def test_an_explicit_api_key_is_still_sent_with_a_token() -> None:
     model = AnthropicModel(model="claude-sonnet-5-5", api_key="sk-ant", auth_token="tok")  # noqa: S106
-    headers = model.client.auth_headers
+    headers = model.client.default_headers
     assert headers.get("X-Api-Key") == "sk-ant"
     assert headers.get("Authorization") == "Bearer tok"
     await model.close()
