@@ -345,15 +345,22 @@ class AnthropicModel(BaseModel):
             import anthropic  # noqa: PLC0415
 
             token = self._auth_token()
+            api_key = self.config.api_key
+            headers = self.config.default_headers
+            if token is not None and api_key is not None:
+                # anthropic>=2 takes one credential and refuses both; an
+                # explicit key goes along with the token as its own header.
+                headers = {"X-Api-Key": api_key, **(headers or {})}
+                api_key = None
             client = anthropic.AsyncAnthropic(
-                api_key=self.config.api_key,
+                api_key=api_key,
                 auth_token=token,
                 base_url=self.base_url,
                 max_retries=self.config.max_retries,
                 timeout=self.config.request_timeout,
-                default_headers=self.config.default_headers,
+                default_headers=headers,
             )
-            if token is not None and self.config.api_key is None:
+            if token is not None:
                 # Some SDK versions read ANTHROPIC_API_KEY whatever else is
                 # passed; with a bearer token for another endpoint that key
                 # must not ride along.
